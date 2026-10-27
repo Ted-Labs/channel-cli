@@ -14,8 +14,9 @@ from channel_cli import adapters, body
 class FakeDaemon:
     """Minimal app-server: one loaded thread, answers turn/start with canned events."""
 
-    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",)):
+    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0):
         self.path, self.answer, self.status, self.loaded = path, answer, status, list(loaded)
+        self.ephemeral, self.busy = set(ephemeral), busy
         self.prompts, self.methods = [], []
         self.server = socket.socket(socket.AF_UNIX)
         cwd = os.getcwd()
@@ -67,6 +68,13 @@ class FakeDaemon:
                 result = {}
                 if method == "thread/loaded/list":
                     result = {"data": self.loaded}
+                elif method == "thread/read":
+                    tid = message["params"]["threadId"]
+                    active = bool(self.busy) and tid not in self.ephemeral and "thread/resume" in self.methods
+                    if active:
+                        self.busy -= 1
+                    result = {"thread": {"id": tid, "ephemeral": tid in self.ephemeral,
+                                         "status": {"type": "active" if active else "idle"}}}
                 elif method == "turn/start":
                     self.prompts.append(message["params"]["input"][0]["text"])
                     frame({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn-1"}}})
@@ -98,7 +106,7 @@ class BodyTests(unittest.TestCase):
         reply = body.run("처음 암호?", 5, d.path)
         self.assertEqual((reply.text, reply.session), ("사과", "thread-1"))
         self.assertEqual(d.prompts, ["처음 암호?"])
-        self.assertEqual(d.methods[:4], ["initialize", "initialized", "thread/loaded/list", "thread/resume"])
+        self.assertEqual(d.methods[:5], ["initialize", "initialized", "thread/loaded/list", "thread/read", "thread/resume"])
 
     def test_long_socket_path(self):
         deep = self.base / ("d" * 60) / ("e" * 60)
@@ -110,6 +118,16 @@ class BodyTests(unittest.TestCase):
         d = self.daemon(status="failed")
         with self.assertRaisesRegex(ValueError, "failed"):
             body.run("hi", 5, d.path)
+
+    def test_ephemeral_helper_thread_ignored(self):
+        d = self.daemon(loaded=("live", "helper"), ephemeral=("helper",))
+        self.assertEqual(body.run("hi", 5, d.path).session, "live")
+
+    def test_waits_while_session_busy(self):
+        d = self.daemon(busy=2)
+        self.assertEqual(body.run("hi", 10, d.path).text, "answer")
+        self.assertEqual(d.methods.count("thread/read"), 1 + 3)
+        self.assertEqual(d.prompts, ["hi"])
 
     def test_ambiguous_threads_rejected(self):
         d = self.daemon(loaded=("a", "b"))

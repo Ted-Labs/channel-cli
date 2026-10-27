@@ -109,10 +109,24 @@ def pick_thread(conn, notes):
     if wanted:
         return wanted
     loaded = conn.request("thread/loaded/list", {}, notes).get("data") or []
-    if len(loaded) != 1:
-        raise ValueError(f"expected one loaded Codex thread on the daemon, found {len(loaded)}; "
+    # The TUI also loads ephemeral helper threads; only a persisted thread is the live session.
+    live = [t for t in loaded if not conn.request("thread/read", {"threadId": t}, notes).get("thread", {}).get("ephemeral")]
+    if len(live) != 1:
+        raise ValueError(f"expected one persisted Codex thread on the daemon, found {len(live)}; "
                          "set CHANNEL_CODEX_THREAD")
-    return loaded[0]
+    return live[0]
+
+
+def wait_idle(conn, thread, deadline, notes):
+    """Wait while the session is busy with a turn typed in the TUI or sent by someone else."""
+    while True:
+        status = (conn.request("thread/read", {"threadId": thread}, notes).get("thread", {}).get("status") or {}).get("type")
+        if status != "active":
+            return
+        if time.monotonic() > deadline:
+            raise TimeoutError("codex session stayed busy until the timeout")
+        notes.clear()
+        time.sleep(1)
 
 
 def run(prompt, timeout, socket_path=None):
@@ -126,6 +140,8 @@ def run(prompt, timeout, socket_path=None):
         conn.send({"jsonrpc": "2.0", "method": "initialized"})
         thread = pick_thread(conn, notes)
         conn.request("thread/resume", {"threadId": thread}, notes)
+        wait_idle(conn, thread, deadline, notes)
+        notes.clear()
         turn = conn.request("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt}]},
                             notes).get("turn", {}).get("id")
         parts = []
