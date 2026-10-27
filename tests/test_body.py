@@ -17,6 +17,7 @@ class FakeDaemon:
     def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0, hold=False):
         self.path, self.answer, self.status, self.loaded = path, answer, status, list(loaded)
         self.ephemeral, self.busy, self.hold = set(ephemeral), busy, hold
+        self.cwds, self.updated = {}, {}
         self.release, self.steers, self.started = threading.Event(), [], threading.Event()
         self.prompts, self.methods = [], []
         self.server = socket.socket(socket.AF_UNIX)
@@ -81,7 +82,7 @@ class FakeDaemon:
                     active = bool(self.busy) and tid not in self.ephemeral and "thread/resume" in self.methods
                     if active:
                         self.busy -= 1
-                    result = {"thread": {"id": tid, "ephemeral": tid in self.ephemeral,
+                    result = {"thread": {"id": tid, "ephemeral": tid in self.ephemeral, "cwd": self.cwds.get(tid), "updatedAt": self.updated.get(tid, 0),
                                          "status": {"type": "active" if active else "idle"}}}
                 elif method == "turn/interrupt":
                     self.status = "interrupted"
@@ -175,6 +176,13 @@ class BodyTests(unittest.TestCase):
             return fn()
         except Exception as exc:
             return exc
+
+    def test_cwd_picks_newest_body_thread(self):
+        d = self.daemon(loaded=("mac", "old", "new"))
+        d.cwds = {"mac": "/elsewhere", "old": str(self.base), "new": str(self.base)}
+        d.updated = {"old": 1, "new": 2}
+        with patch.dict(os.environ, {"CHANNEL_CODEX_CWD": str(self.base)}):
+            self.assertEqual(body.run("hi", 5, d.path).session, "new")
 
     def test_ambiguous_threads_rejected(self):
         d = self.daemon(loaded=("a", "b"))

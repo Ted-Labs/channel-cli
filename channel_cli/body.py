@@ -114,7 +114,15 @@ def pick_thread(conn, notes):
         return wanted
     loaded = conn.request("thread/loaded/list", {}, notes).get("data") or []
     # The TUI also loads ephemeral helper threads; only a persisted thread is the live session.
-    live = [t for t in loaded if not conn.request("thread/read", {"threadId": t}, notes).get("thread", {}).get("ephemeral")]
+    reads = [conn.request("thread/read", {"threadId": t}, notes).get("thread", {}) | {"id": t} for t in loaded]
+    live = [r for r in reads if not r.get("ephemeral")]
+    # A shared daemon can hold sessions from other clients; CHANNEL_CODEX_CWD picks the body's folder, newest first.
+    cwd = os.environ.get("CHANNEL_CODEX_CWD")
+    if cwd:
+        want = os.path.realpath(cwd)
+        live = sorted([r for r in live if r.get("cwd") and os.path.realpath(r["cwd"]) == want],
+                      key=lambda r: r.get("updatedAt") or 0, reverse=True)[:1]
+    live = [r["id"] for r in live]
     if len(live) != 1:
         raise ValueError(f"expected one persisted Codex thread on the daemon, found {len(live)}; "
                          "set CHANNEL_CODEX_THREAD")
