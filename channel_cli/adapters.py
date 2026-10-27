@@ -8,7 +8,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-AGENTS = ("claude", "codex", "agy", "opencode")
+AGENTS = ("claude", "codex", "agy", "opencode", "codex-body")
+# Agents reached through a daemon socket instead of a new process per message.
+BODIES = ("codex-body",)
 ALIASES = {"gemini": "agy"}
 
 
@@ -18,9 +20,17 @@ class Reply:
     session: str | None
 
 
+def locate(agent):
+    if agent == "codex-body":
+        from .body import default_socket
+        path = default_socket()
+        return path if os.path.exists(path) else None
+    return shutil.which(agent)
+
+
 def discover():
     return [{"id": a, "aliases": [k for k, v in ALIASES.items() if v == a],
-             "path": shutil.which(a), "installed": bool(shutil.which(a)),
+             "path": locate(a), "installed": bool(locate(a)),
              "authentication": "unchecked"} for a in AGENTS]
 
 
@@ -105,6 +115,10 @@ def terminate(proc):
 
 
 def run(agent, prompt, cwd, session, timeout, logs):
+    if agent == "codex-body":
+        # The live thread is shared by every room; the stored session is informational.
+        from . import body
+        return body.run(prompt, timeout)
     executable = shutil.which(agent)
     if not executable:
         raise ValueError(f"agent executable not found: {agent}")

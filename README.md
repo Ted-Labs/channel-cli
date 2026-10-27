@@ -36,6 +36,14 @@ channel worker --once --timeout 120
 printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 ```
 
+## 떠 있는 Codex 세션에 넣기 (`codex-body`)
+
+`@codex-body`는 새 Codex를 띄우지 않고 Codex app-server 데몬이 쥔 세션에 말을 넣는다. 그 세션을 `codex --remote unix://<소켓>`으로 연 TUI에는 넣은 말과 답이 실시간으로 보이고 기억도 하나로 이어진다. 같은 세션 ID로 `codex exec resume`을 걸면 Codex가 `already has an active writer`로 거부하므로 이 길을 쓴다.
+
+- 소켓: `CHANNEL_CODEX_SOCKET`, 없으면 `$CODEX_HOME/app-server-control/app-server-control.sock`. `agents`는 소켓이 있으면 설치로 표시한다.
+- 세션: `CHANNEL_CODEX_THREAD`, 없으면 데몬에 열린 세션이 정확히 하나일 때 그것을 쓴다. 모든 방이 같은 세션을 공유한다.
+- `initialize` → `thread/resume` → `turn/start`로 넣고, 그 turn의 `agentMessage`를 `turn/completed`까지 모아 답으로 저장한다.
+
 ## 채널 연결 계약
 
 서버에서 대상을 이미 선택하고 본문에 인용·코드·다른 @표식이 포함되는 경우 `send --agent <이름> --literal`을 사용한다. 본문을 다시 멘션으로 해석하지 않는다.

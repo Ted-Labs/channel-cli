@@ -66,13 +66,18 @@ class ChannelTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.bin = self.base / 'bin'
         self.bin.mkdir()
-        for agent in adapters.AGENTS:
+        for agent in set(adapters.AGENTS) - set(adapters.BODIES):
             exe = self.bin / agent
             exe.write_text(FAKE)
             exe.chmod(0o700)
         self.env = {**os.environ, 'CHANNEL_HOME': str(self.store.home),
                     'PYTHONPATH': str(ROOT), 'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}
         self.env.pop('CHANNEL_DEFAULT_AGENT', None)
+        # Never reach a real Codex daemon from tests; daemon bodies are covered by test_body.
+        self.env['CHANNEL_CODEX_SOCKET'] = str(self.base / 'no-daemon.sock')
+        patcher = patch.dict(os.environ, {'CHANNEL_CODEX_SOCKET': self.env['CHANNEL_CODEX_SOCKET']})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def cli(self, *args, ok=True):
         p = subprocess.run([sys.executable, '-m', 'channel_cli', '--json', *args], env=self.env,
@@ -156,7 +161,7 @@ class ChannelTests(unittest.TestCase):
             self.store.change(a['id'], 'cancel')
 
     def test_all_adapter_roundtrips_and_session_resume(self):
-        for agent in adapters.AGENTS:
+        for agent in set(adapters.AGENTS) - set(adapters.BODIES):
             with self.subTest(agent=agent):
                 self.enqueue(agent=agent)
                 result = json.loads(self.cli('worker', '--once').stdout)
@@ -279,7 +284,7 @@ class ChannelTests(unittest.TestCase):
         for args in (['--json', 'agents'], ['agents', '--json']):
             p = subprocess.run([sys.executable, '-m', 'channel_cli', *args], env=self.env,
                                capture_output=True, text=True, timeout=5, cwd=ROOT)
-            self.assertEqual(len(json.loads(p.stdout)), 4)
+            self.assertEqual(len(json.loads(p.stdout)), len(adapters.AGENTS))
         job = self.enqueue()
         result = subprocess.run([sys.executable, '-m', 'channel_cli', 'worker', '--once'], env=self.env,
                                 capture_output=True, text=True, timeout=5, cwd=ROOT)
