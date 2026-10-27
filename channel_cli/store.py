@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS jobs (
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
 );
+CREATE TABLE IF NOT EXISTS turns (
+ job_id TEXT PRIMARY KEY, thread TEXT NOT NULL, turn TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
  type TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL
@@ -149,6 +152,32 @@ class Store:
                 raise ValueError(f"cannot {action} a {job['state']} job")
             self.event(job_id, action)
         return self.get(job_id)
+
+    def set_turn(self, job_id, thread, turn):
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO turns VALUES(?,?,?)", (job_id, thread, turn))
+            self.event(job_id, "turn")
+
+    def turn(self, job_id):
+        row = self.db.execute("SELECT thread, turn FROM turns WHERE job_id=?", (self.get(job_id)["id"],)).fetchone()
+        return (row["thread"], row["turn"]) if row else None
+
+    def running(self, agent):
+        row = self.db.execute("SELECT id FROM jobs WHERE state='running' AND agent=? ORDER BY seq DESC LIMIT 1",
+                              (agent,)).fetchone()
+        return self.get(row["id"]) if row else None
+
+    def steered(self, job_id, into):
+        """A queued job whose text was added to another job's running turn."""
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            job = self.get(job_id)
+            if job["state"] != "queued":
+                raise ValueError(f"cannot steer a {job['state']} job")
+            self.db.execute("UPDATE jobs SET state='steered',answer=?,finished=? WHERE id=?",
+                            (f"steered into {into}", time.time(), job["id"]))
+            self.event(job["id"], "steered")
+        return self.get(job["id"])
 
     def jobs(self, limit, state=None):
         if state:

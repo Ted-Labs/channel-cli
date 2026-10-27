@@ -14,9 +14,10 @@ from channel_cli import adapters, body
 class FakeDaemon:
     """Minimal app-server: one loaded thread, answers turn/start with canned events."""
 
-    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0):
+    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0, hold=False):
         self.path, self.answer, self.status, self.loaded = path, answer, status, list(loaded)
-        self.ephemeral, self.busy = set(ephemeral), busy
+        self.ephemeral, self.busy, self.hold = set(ephemeral), busy, hold
+        self.release, self.steers, self.started = threading.Event(), [], threading.Event()
         self.prompts, self.methods = [], []
         self.server = socket.socket(socket.AF_UNIX)
         cwd = os.getcwd()
@@ -25,15 +26,22 @@ class FakeDaemon:
             self.server.bind(os.path.basename(path))
         finally:
             os.chdir(cwd)
-        self.server.listen(1)
-        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.server.listen(4)
+        self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
     def close(self):
         self.server.close()
 
-    def serve(self):
-        conn, _ = self.server.accept()
+    def accept(self):
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def serve(self, conn):
         with conn:
             buf = b""
             while b"\r\n\r\n" not in buf:
@@ -75,9 +83,20 @@ class FakeDaemon:
                         self.busy -= 1
                     result = {"thread": {"id": tid, "ephemeral": tid in self.ephemeral,
                                          "status": {"type": "active" if active else "idle"}}}
+                elif method == "turn/interrupt":
+                    self.status = "interrupted"
+                    self.release.set()
+                elif method == "turn/steer":
+                    assert message["params"]["expectedTurnId"] == "turn-1"
+                    self.steers.append(message["params"]["input"][0]["text"])
+                    self.answer += "+" + self.steers[-1]
+                    self.release.set()
                 elif method == "turn/start":
                     self.prompts.append(message["params"]["input"][0]["text"])
                     frame({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn-1"}}})
+                    self.started.set()
+                    if self.hold:
+                        self.release.wait(10)
                     frame({"jsonrpc": "2.0", "method": "item/completed",
                            "params": {"turnId": "other", "item": {"type": "agentMessage", "text": "not mine"}}})
                     frame({"jsonrpc": "2.0", "method": "item/completed",
@@ -129,6 +148,34 @@ class BodyTests(unittest.TestCase):
         self.assertEqual(d.methods.count("thread/read"), 1 + 3)
         self.assertEqual(d.prompts, ["hi"])
 
+    def test_interrupt_stops_held_turn(self):
+        d = self.daemon(hold=True)
+        seen = []
+        worker = threading.Thread(target=lambda: seen.append(self.catch(lambda: body.run("long", 10, d.path, on_turn=lambda *t: seen.append(t)))))
+        worker.start()
+        self.assertTrue(d.started.wait(5))
+        body.interrupt("thread-1", "turn-1", d.path)
+        worker.join(5)
+        self.assertEqual(seen[0], ("thread-1", "turn-1"))
+        self.assertIsInstance(seen[1], body.Interrupted)
+
+    def test_steer_adds_to_running_turn(self):
+        d = self.daemon(hold=True)
+        out = []
+        worker = threading.Thread(target=lambda: out.append(body.run("long", 10, d.path)))
+        worker.start()
+        self.assertTrue(d.started.wait(5))
+        body.steer("thread-1", "turn-1", "also this", d.path)
+        worker.join(5)
+        self.assertEqual(out[0].text, "answer+also this")
+
+    @staticmethod
+    def catch(fn):
+        try:
+            return fn()
+        except Exception as exc:
+            return exc
+
     def test_ambiguous_threads_rejected(self):
         d = self.daemon(loaded=("a", "b"))
         with self.assertRaisesRegex(ValueError, "CHANNEL_CODEX_THREAD"):
@@ -149,3 +196,49 @@ class BodyTests(unittest.TestCase):
         with patch.dict(os.environ, {"CHANNEL_CODEX_SOCKET": d.path}):
             self.assertEqual(adapters.run("codex-body", "hi", None, None, 5, self.base / "logs").text, "answer")
             self.assertTrue(next(a for a in adapters.discover() if a["id"] == "codex-body")["installed"])
+
+
+class BodyCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.d = FakeDaemon(str(self.base / "app.sock"), hold=True)
+        self.addCleanup(self.d.close)
+        self.env = {**os.environ, "CHANNEL_HOME": str(self.base / "state"), "CHANNEL_CODEX_SOCKET": self.d.path,
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+
+    def cli(self, *args):
+        import subprocess, sys
+        p = subprocess.run([sys.executable, "-m", "channel_cli", "--json", *args], env=self.env,
+                           capture_output=True, text=True, timeout=15)
+        return json.loads(p.stdout or p.stderr)
+
+    def start_worker(self):
+        import subprocess, sys
+        first = self.cli("send", "--agent", "codex-body", "long job")
+        proc = subprocess.Popen([sys.executable, "-m", "channel_cli", "--json", "worker", "--once", "--timeout", "10"],
+                                env=self.env, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        self.assertTrue(self.d.started.wait(5))
+        return first, proc
+
+    def test_steer_queued_job_into_running_turn(self):
+        first, proc = self.start_worker()
+        second = self.cli("send", "--agent", "codex-body", "now please")
+        steered = self.cli("steer", second["id"][:8])
+        self.assertEqual(steered["state"], "steered")
+        done = json.loads(proc.communicate(timeout=10)[0])
+        self.assertEqual((done["id"], done["state"], done["answer"]), (first["id"], "done", "answer+now please"))
+        self.assertIn("steered", [e["type"] for e in self.cli("events", "--after", "0")])
+
+    def test_interrupt_running_job(self):
+        first, proc = self.start_worker()
+        self.cli("interrupt", first["id"])
+        done = json.loads(proc.communicate(timeout=10)[0])
+        self.assertEqual((done["state"], done["error"]), ("interrupted", "stopped by interrupt"))
+
+    def test_steer_without_running_turn_keeps_job_queued(self):
+        job = self.cli("send", "--agent", "codex-body", "later")
+        self.assertIn("no running turn", self.cli("steer", job["id"])["error"])
+        self.assertEqual(self.cli("result", job["id"])["state"], "queued")

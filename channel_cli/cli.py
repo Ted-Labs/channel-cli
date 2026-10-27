@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters
+from . import adapters, body
 from .store import Store
 from .output import emit as display
 
@@ -79,7 +79,11 @@ def parser():
     worker.add_argument("--poll", type=positive, default=1, help="idle poll interval in seconds")
     jobs = sub.add_parser("jobs")
     jobs.add_argument("--limit", type=bounded, default=20)
-    jobs.add_argument("--state", choices=("queued", "running", "done", "failed", "interrupted", "cancelled"))
+    jobs.add_argument("--state", choices=("queued", "running", "done", "failed", "interrupted", "cancelled", "steered"))
+    stop = sub.add_parser("interrupt", help="stop the running turn of a daemon-backed job")
+    stop.add_argument("job_id")
+    steer = sub.add_parser("steer", help="add a queued job's text to the running turn of the same agent now")
+    steer.add_argument("job_id")
     for name in ("result", "cancel", "retry"):
         item = sub.add_parser(name)
         item.add_argument("job_id")
@@ -114,11 +118,14 @@ def worker(store, args):
                 if not args.json:
                     print(f"실행 중 · @{job['agent']} · {job['id'][:8]}\n", flush=True)
                 reply = adapters.run(job["agent"], job["prompt"], job["cwd"], store.session(job),
-                                     args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]))
+                                     args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
+                                     on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn))
                 result = store.finish(job, "done", answer=reply.text, session=reply.session)
             except KeyboardInterrupt:
                 emit(store.finish(job, "interrupted", error="worker interrupted; inspect logs before retry"), args)
                 return 130
+            except body.Interrupted:
+                result = store.finish(job, "interrupted", error="stopped by interrupt")
             except subprocess.TimeoutExpired:
                 result = store.finish(job, "failed", error=f"agent exceeded {args.timeout:g}s timeout; inspect logs before retry")
             except (OSError, ValueError) as exc:
@@ -159,6 +166,25 @@ def main():
             emit(store.jobs(args.limit, args.state), args)
         elif args.command == "result":
             emit(store.get(args.job_id), args)
+        elif args.command == "interrupt":
+            job = store.get(args.job_id)
+            turn = store.turn(job["id"]) if job["state"] == "running" else None
+            if not turn:
+                raise ValueError(f"no running daemon turn for job {job['id'][:8]} ({job['state']})")
+            body.interrupt(*turn)
+            emit(store.get(job["id"]), args)
+        elif args.command == "steer":
+            job = store.get(args.job_id)
+            if job["state"] != "queued":
+                raise ValueError(f"cannot steer a {job['state']} job")
+            if job["agent"] not in adapters.BODIES:
+                raise ValueError(f"steer needs a daemon-backed agent, not {job['agent']}")
+            current = store.running(job["agent"])
+            turn = store.turn(current["id"]) if current else None
+            if not turn:
+                raise ValueError(f"@{job['agent']} has no running turn; the job stays queued")
+            body.steer(*turn, job["prompt"])
+            emit(store.steered(job["id"], current["id"]), args)
         elif args.command in ("cancel", "retry"):
             emit(store.change(args.job_id, args.command), args)
         elif args.command == "events":

@@ -18,6 +18,10 @@ def default_socket():
     return os.environ.get("CHANNEL_CODEX_SOCKET") or str(Path(home) / "app-server-control" / "app-server-control.sock")
 
 
+class Interrupted(Exception):
+    """The turn was stopped with turn/interrupt."""
+
+
 class Connection:
     def __init__(self, path, timeout):
         self.sock = socket.socket(socket.AF_UNIX)
@@ -129,7 +133,7 @@ def wait_idle(conn, thread, deadline, notes):
         time.sleep(1)
 
 
-def run(prompt, timeout, socket_path=None):
+def run(prompt, timeout, socket_path=None, on_turn=None):
     """Start a turn in the daemon's live thread and wait for it to finish."""
     from .adapters import Reply
     deadline = time.monotonic() + timeout
@@ -144,6 +148,8 @@ def run(prompt, timeout, socket_path=None):
         notes.clear()
         turn = conn.request("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt}]},
                             notes).get("turn", {}).get("id")
+        if on_turn:
+            on_turn(thread, turn)
         parts = []
         while True:
             message = notes.pop(0) if notes else conn.receive()
@@ -161,6 +167,8 @@ def run(prompt, timeout, socket_path=None):
                 raise ValueError(f"codex turn failed: {params.get('error') or params}")
             elif method == "turn/completed":
                 status = (params.get("turn") or {}).get("status")
+                if status == "interrupted":
+                    raise Interrupted("codex turn was interrupted")
                 if status not in (None, "completed"):
                     raise ValueError(f"codex turn ended as {status}: {(params.get('turn') or {}).get('error')}")
                 break
@@ -172,3 +180,24 @@ def run(prompt, timeout, socket_path=None):
         raise TimeoutError(f"codex turn did not finish within {timeout:g}s")
     finally:
         conn.close()
+
+
+def _control(method, params, socket_path=None):
+    conn = Connection(socket_path or default_socket(), 15)
+    notes = []
+    try:
+        conn.request("initialize", {"clientInfo": {"name": "channel-cli", "version": "0.1.0"}}, notes)
+        conn.send({"jsonrpc": "2.0", "method": "initialized"})
+        conn.request("thread/resume", {"threadId": params["threadId"]}, notes)
+        return conn.request(method, params, notes)
+    finally:
+        conn.close()
+
+
+def interrupt(thread, turn, socket_path=None):
+    return _control("turn/interrupt", {"threadId": thread, "turnId": turn}, socket_path)
+
+
+def steer(thread, turn, text, socket_path=None):
+    return _control("turn/steer", {"threadId": thread, "expectedTurnId": turn,
+                                   "input": [{"type": "text", "text": text}]}, socket_path)

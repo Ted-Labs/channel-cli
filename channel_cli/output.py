@@ -5,7 +5,7 @@ import sys
 import unicodedata
 
 STATES = {"queued": "대기", "running": "실행 중", "done": "완료", "failed": "실패",
-          "interrupted": "중단", "cancelled": "취소"}
+          "interrupted": "중단", "cancelled": "취소", "steered": "지금 turn 에 얹음"}
 
 
 def width(text):
@@ -59,7 +59,7 @@ def render(value, command, verbose=False):
             return '새 이벤트가 없습니다.'
         return '\n\n'.join(f"#{e['seq']} · {STATES.get(e['type'], e['type'])}\n" + render(e['payload'], 'result') for e in value)
     job = value
-    label = {'send': '접수', 'retry': '재접수', 'cancel': '취소'}.get(command, STATES[job['state']])
+    label = {'send': '접수', 'retry': '재접수', 'cancel': '취소', 'interrupt': '중지 요청', 'steer': '지금 바로'}.get(command, STATES[job['state']])
     head = f"{label} · @{job['agent']} · {plain(job['channel'])}/{plain(job['room'])} · {job['id'][:8]}"
     if command in ('send', 'retry', 'cancel'):
         return head + '\n  ' + clipped(job['prompt'], max(20, shutil.get_terminal_size((100, 24)).columns - 4))

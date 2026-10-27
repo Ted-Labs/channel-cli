@@ -43,7 +43,9 @@ printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 - 소켓: `CHANNEL_CODEX_SOCKET`, 없으면 `$CODEX_HOME/app-server-control/app-server-control.sock`. `agents`는 소켓이 있으면 설치로 표시한다.
 - 세션: `CHANNEL_CODEX_THREAD`, 없으면 데몬에 열린 세션 중 임시(ephemeral)가 아닌 것이 정확히 하나일 때 그것을 쓴다. 모든 방이 같은 세션을 공유한다.
 - 세션이 일하는 중(`active`)이면 끝날 때까지 기다렸다가 넣는다. 제한 시간 안에 끝나지 않으면 실패로 남긴다.
-- `initialize` → `thread/resume` → `turn/start`로 넣고, 그 turn의 `agentMessage`를 `turn/completed`까지 모아 답으로 저장한다.
+- `initialize` → `thread/resume` → `turn/start`로 넣고, 그 turn의 `agentMessage`를 `turn/completed`까지 모아 답으로 저장한다. 시작한 turn은 `turn` 이벤트로 알린다.
+- `channel interrupt <작업>`: 실행 중인 작업의 turn을 `turn/interrupt`로 멈춘다. 작업은 `interrupted`가 된다.
+- `channel steer <대기 작업>`: 대기 중인 말을 같은 에이전트의 실행 중 turn에 `turn/steer`로 바로 얹는다. 대기 작업은 `steered`가 되고, 답은 실행 중이던 작업의 답에 함께 담긴다. 실행 중 turn이 없으면 오류를 내고 대기로 둔다.
 
 ## 채널 연결 계약
 
