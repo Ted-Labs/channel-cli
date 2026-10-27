@@ -1,0 +1,74 @@
+# Atrium 실행 구성요소
+
+Atrium은 한 사람의 주 에이전트를 중심으로 여러 에이전트를 연결하는 공통 플랫폼이다. 이 패키지는 Atrium의 독립 실행 구성요소이며, 여러 채널에서 설치된 에이전트 CLI를 하나의 로컬 큐로 호출한다. 웹·Telegram 등의 채널은 메시지를 넣고 결과 이벤트를 읽으며, 에이전트 선택과 세션 관리는 이 CLI가 담당한다.
+
+Python 3.11 이상, macOS/Linux에서 동작한다. 런타임 외부 의존성은 없다.
+
+```sh
+uv tool install --editable .
+atrium agents
+channel send --channel web --room dev --message-id web-123 '@agy 안녕'
+channel worker --once
+channel jobs
+channel result <job-id>
+```
+
+`atrium`이 기본 명령이며 기존 `channel` 명령도 같은 실행 구성요소를 호출하는 호환 별칭으로 유지한다.
+
+설치하지 않고 소스 폴더에서 `python3 -m channel_cli`로도 실행할 수 있다. 기본 출력은 터미널에서 읽는 표와 답변 본문이다. 채널 연동에는 `--json`을 붙인다. JSON 모드에서 명령의 stdout은 JSON이며, 상시 워커는 완료·실패 결과를 JSONL로 출력한다. 에이전트의 원본 출력은 stdout에 섞지 않는다. `--json`은 하위 명령 앞뒤 모두 지정할 수 있다. `channel agents --verbose`는 실행 파일 경로까지 표시한다. 작업은 화면에 표시한 8자리 ID로도 조회·취소·재시도할 수 있으며, 앞자리가 겹치면 더 긴 ID를 사용한다.
+
+## 큐와 대화
+
+- `claude`, `codex`, `agy`, `opencode`를 PATH에서 탐색한다. `@gemini`와 `--agent gemini`는 `agy`의 별칭이며 구 Gemini CLI를 실행하지 않는다. 설치 탐색은 인증·구독·모델 가용성을 검사하지 않는다. 실제 호출 오류는 해당 작업의 실패 상태와 로그로 확인한다.
+- `@claude 질문` 또는 `--agent claude`로 에이전트를 지정한다. 표식이 없으면 `CHANNEL_DEFAULT_AGENT`를 사용하며, 기본값도 없으면 입력을 거부한다. 알 수 없는 멘션이나 서로 다른 에이전트의 복수 멘션은 거부한다. 이메일 안의 `@`는 표식으로 읽지 않는다.
+- 큐 전체는 하나의 FIFO이며 워커 하나만 실행한다. 각 요청은 순차 처리된다. 에이전트별 병렬 처리는 첫 버전에 포함하지 않는다.
+- 세션은 `(channel, room, agent)`별로 분리하고 각 CLI의 네이티브 세션 ID로 이어 간다. 에이전트끼리 대화 맥락을 자동 공유하지 않는다.
+- 방은 첫 메시지 때 작업 디렉터리에 연결된다. `--cwd /path/to/project`를 생략하면 상태 폴더 아래에 전용 디렉터리를 만든다. 기존 방의 디렉터리를 바꿀 때는 새 방을 사용한다.
+- `--message-id`는 `(channel, room)` 범위의 중복 방지 키다. 같은 키와 본문·에이전트로 다시 넣으면 기존 작업을 돌려준다. 내용이 바뀌면 오류다. 키 없이 보내면 매번 새 작업이다.
+
+```sh
+export CHANNEL_DEFAULT_AGENT=agy
+channel send --channel telegram --room topic-7 --message-id telegram-456 \
+  --cwd /path/to/project '@codex 이 함수 설명해줘'
+channel worker                 # 대기하며 계속 처리
+channel worker --drain         # 현재 큐가 빌 때 종료
+channel worker --once --timeout 120
+printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
+```
+
+## 채널 연결 계약
+
+서버에서 대상을 이미 선택하고 본문에 인용·코드·다른 @표식이 포함되는 경우 `send --agent <이름> --literal`을 사용한다. 본문을 다시 멘션으로 해석하지 않는다.
+
+
+1. 채널은 `send --json`에 채널 ID, 방 ID, 채널 메시지 ID와 본문을 전달한다. 반환되는 `id`가 작업 ID다.
+2. 별도 프로세스에서 `worker --json`을 실행한다.
+3. 채널은 `events --json --channel web --after <cursor>`를 호출한다. 이벤트는 `seq`, `job_id`, `type`, `created`, `payload`를 가진다. `payload`는 그 시점의 작업 전체이며 `channel`, `room`, `message_id`, `agent`, `state`, `answer`, `error`를 포함한다.
+4. `done` 이벤트의 `answer`를 원래 방에 답장한다. `failed`·`interrupted`는 상태를 표시한다. 처리한 마지막 `seq`를 채널이 저장하고 다음 조회의 `--after`로 사용한다.
+
+이벤트는 삭제하지 않고 저장한다. 전송과 커서 저장 사이에 채널이 꺼지면 재전송될 수 있으므로 채널도 `job_id + event.seq`로 중복을 처리해야 한다. CLI가 외부 채널에 직접 게시하지는 않는다.
+
+```sh
+channel events --json --channel web --after 0 --limit 100
+channel jobs --state failed
+channel cancel <queued-job-id>
+channel retry <failed-or-interrupted-job-id>
+```
+
+## 실패와 실행 권한
+
+기본 제한 시간은 요청당 300초다. 시간 초과나 SIGINT/SIGTERM은 실행한 프로세스 그룹을 종료한다. 다음 워커가 시작되면 완료 기록 없이 남은 `running` 작업을 `interrupted`로 바꾼다. 실패·중단 작업은 자동 재시도하지 않는다. 명시적 재시도 전 원본 로그와 실행 결과를 확인해야 한다. 에이전트가 작업을 수행한 직후 결과 저장 전에 종료되었을 수 있으므로 외부 부작용에 대한 exactly-once 실행은 보장하지 않는다. 실패 이후의 다른 대기 요청은 계속 처리된다.
+
+SIGKILL·OS 장애는 종료 처리를 실행할 수 없으며 자식 에이전트가 남을 수 있다. 이 경우 잔존 프로세스를 확인한 뒤 워커를 재실행한다. 실행 중 작업을 취소하는 명령은 없으며 워커에 SIGINT/SIGTERM을 보낸다. `cancel`은 대기 작업에만 적용된다.
+
+셸을 거치지 않고 실행하며 권한 우회 플래그는 사용하지 않는다. Claude·Codex·OpenCode는 프롬프트를 stdin으로 전달한다. `agy`는 현재 print 인터페이스가 요구하는 `--print=<본문>` 인자로 전달하므로 실행 중 로컬 프로세스 인자에 본문이 보일 수 있다. Claude는 `--strict-mcp-config`로 기존 MCP poller를 중복 시작하지 않는다. Codex 새 세션은 `read-only`, `agy`는 `plan`으로 시작한다. Claude·OpenCode는 각 도구의 기존 비대화형 권한 정책을 따른다. CLI 전체에 공통된 샌드박스를 제공하지 않는다. 에이전트 실행은 로컬 사용자의 인증과 설정을 사용한다.
+
+## 저장 위치와 검사
+
+기본 상태는 `~/.local/state/channel`에 저장한다. `CHANNEL_HOME` 또는 최상위 `--home`으로 분리할 수 있다. SQLite 큐·이벤트·세션과 `logs/<job-id>/<attempt>/stdout.log`, `stderr.log`를 저장한다. 메시지와 답변이 들어 있으므로 폴더·파일은 현재 사용자만 읽도록 생성한다. 자동 보존 기간·로그 정리는 아직 제공하지 않는다.
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+검사는 임시 상태 폴더와 가짜 실행 파일로 큐·어댑터·세션·동시 접근·실패·종료 흐름을 실행한다. 실제 CLI의 인증과 출력 호환성은 각 환경에서 따로 확인한다.
