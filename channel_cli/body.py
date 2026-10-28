@@ -151,7 +151,12 @@ def run(prompt, timeout, socket_path=None, on_turn=None):
         conn.request("initialize", {"clientInfo": {"name": "channel-cli", "version": "0.1.0"}}, notes)
         conn.send({"jsonrpc": "2.0", "method": "initialized"})
         thread = pick_thread(conn, notes)
-        conn.request("thread/resume", {"threadId": thread}, notes)
+        try:
+            conn.request("thread/resume", {"threadId": thread}, notes)
+        except ValueError as e:
+            # A freshly opened TUI thread has no rollout file until its first turn; it is already loaded, so start the turn.
+            if "no rollout found" not in str(e):
+                raise
         wait_idle(conn, thread, deadline, notes)
         notes.clear()
         turn = conn.request("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt}]},
