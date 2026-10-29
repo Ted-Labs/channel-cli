@@ -163,16 +163,40 @@ def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None):
                             notes).get("turn", {}).get("id")
         if on_turn:
             on_turn(thread, turn)
+        owned_turns = {turn} if turn else set()
         parts = []
+        pending_parts = {}
         while True:
             message = notes.pop(0) if notes else conn.receive()
             if time.monotonic() > deadline:
                 raise TimeoutError(f"codex turn did not finish within {timeout:g}s")
             params = message.get("params") or {}
             owner = params.get("turnId") or (params.get("turn") or {}).get("id")
-            if turn and owner and owner != turn:
-                continue
             method = message.get("method")
+            event_thread = params.get("threadId") or (params.get("turn") or {}).get("threadId")
+            if method == "turn/started" and owner and (not event_thread or event_thread == thread):
+                owned_turns.add(owner)
+            if event_thread and event_thread != thread:
+                continue
+            if owned_turns and owner and owner not in owned_turns:
+                item = params.get("item") or {}
+                if method == "item/completed" and item.get("type") == "agentMessage":
+                    pending_parts.setdefault(owner, []).append(item.get("text") or "")
+                    continue
+                elif method == "turn/completed":
+                    # turn/steer is sent on a separate control connection. Newer
+                    # daemons can move the work to a successor turn without
+                    # broadcasting its turn/started event to this connection.
+                    # Only adopt that turn after the selected thread is idle;
+                    # an unrelated thread's completion cannot make ours idle.
+                    state = conn.request("thread/read", {"threadId": thread}, notes).get("thread", {})
+                    if (state.get("status") or {}).get("type") != "active":
+                        owned_turns.add(owner)
+                        parts.extend(pending_parts.pop(owner, []))
+                    else:
+                        continue
+                else:
+                    continue
             item = params.get("item") or {}
             if method == "item/completed" and item.get("type") == "agentMessage":
                 parts.append(item.get("text") or "")

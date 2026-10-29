@@ -14,9 +14,9 @@ from channel_cli import adapters, body
 class FakeDaemon:
     """Minimal app-server: one loaded thread, answers turn/start with canned events."""
 
-    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0, hold=False):
+    def __init__(self, path, answer="answer", status="completed", loaded=("thread-1",), ephemeral=(), busy=0, hold=False, steer_turn=False):
         self.path, self.answer, self.status, self.loaded = path, answer, status, list(loaded)
-        self.ephemeral, self.busy, self.hold = set(ephemeral), busy, hold
+        self.ephemeral, self.busy, self.hold, self.steer_turn = set(ephemeral), busy, hold, steer_turn
         self.cwds, self.updated = {}, {}
         self.release, self.steers, self.started = threading.Event(), [], threading.Event()
         self.prompts, self.methods = [], []
@@ -98,12 +98,15 @@ class FakeDaemon:
                     self.started.set()
                     if self.hold:
                         self.release.wait(10)
+                    owner = "turn-2" if self.steer_turn and self.steers else "turn-1"
                     frame({"jsonrpc": "2.0", "method": "item/completed",
                            "params": {"turnId": "other", "item": {"type": "agentMessage", "text": "not mine"}}})
                     frame({"jsonrpc": "2.0", "method": "item/completed",
-                           "params": {"turnId": "turn-1", "item": {"type": "agentMessage", "text": self.answer}}})
-                    frame({"jsonrpc": "2.0", "method": "turn/completed",
-                           "params": {"turn": {"id": "turn-1", "status": self.status}}})
+                           "params": {"turnId": owner, "item": {"type": "agentMessage", "text": self.answer}}})
+                    completed = {"turn": {"id": owner, "status": self.status}}
+                    if self.steer_turn:
+                        completed["threadId"] = "thread-1"
+                    frame({"jsonrpc": "2.0", "method": "turn/completed", "params": completed})
                     continue
                 frame({"jsonrpc": "2.0", "id": message["id"], "result": result})
 
@@ -168,6 +171,17 @@ class BodyTests(unittest.TestCase):
         self.assertTrue(d.started.wait(5))
         body.steer("thread-1", "turn-1", "also this", d.path)
         worker.join(5)
+        self.assertEqual(out[0].text, "answer+also this")
+
+    def test_steer_follows_unannounced_successor_turn_for_same_thread(self):
+        d = self.daemon(hold=True, steer_turn=True)
+        out = []
+        worker = threading.Thread(target=lambda: out.append(body.run("long", 10, d.path)))
+        worker.start()
+        self.assertTrue(d.started.wait(5))
+        body.steer("thread-1", "turn-1", "also this", d.path)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
         self.assertEqual(out[0].text, "answer+also this")
 
     @staticmethod
