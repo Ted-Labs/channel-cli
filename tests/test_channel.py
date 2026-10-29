@@ -86,6 +86,16 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         return p
 
+    def test_part_appends_answer_and_records_event(self):
+        job = self.enqueue()
+        self.store.part(job['id'], 'early')  # queued: ignored
+        claimed = self.store.claim()
+        self.store.part(claimed['id'], 'one')
+        self.store.part(claimed['id'], 'two')
+        self.assertEqual(self.store.get(claimed['id'])['answer'], 'one\ntwo')
+        kinds = [e['type'] for e in self.store.events(0, 100)]
+        self.assertEqual(kinds.count('part'), 2)
+
     def enqueue(self, text='hello', agent='claude', room='r', channel='web', message_id=None):
         return self.store.enqueue(channel, room, agent, text, text, message_id=message_id)
 

@@ -119,7 +119,8 @@ def worker(store, args):
                     print(f"실행 중 · @{job['agent']} · {job['id'][:8]}\n", flush=True)
                 reply = adapters.run(job["agent"], job["prompt"], job["cwd"], store.session(job),
                                      args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
-                                     on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn))
+                                     on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
+                                     on_part=lambda text, j=job["id"]: store.part(j, text))
                 result = store.finish(job, "done", answer=reply.text, session=reply.session)
             except KeyboardInterrupt:
                 emit(store.finish(job, "interrupted", error="worker interrupted; inspect logs before retry"), args)

@@ -114,11 +114,11 @@ def terminate(proc):
             pass
 
 
-def run(agent, prompt, cwd, session, timeout, logs, on_turn=None):
+def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_part=None):
     if agent == "codex-body":
         # The live thread is shared by every room; the stored session is informational.
         from . import body
-        return body.run(prompt, timeout, on_turn=on_turn)
+        return body.run(prompt, timeout, on_turn=on_turn, on_part=on_part)
     executable = shutil.which(agent)
     if not executable:
         raise ValueError(f"agent executable not found: {agent}")

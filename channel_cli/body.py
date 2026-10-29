@@ -141,7 +141,7 @@ def wait_idle(conn, thread, deadline, notes):
         time.sleep(1)
 
 
-def run(prompt, timeout, socket_path=None, on_turn=None):
+def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None):
     """Start a turn in the daemon's live thread and wait for it to finish."""
     from .adapters import Reply
     deadline = time.monotonic() + timeout
@@ -176,6 +176,8 @@ def run(prompt, timeout, socket_path=None, on_turn=None):
             item = params.get("item") or {}
             if method == "item/completed" and item.get("type") == "agentMessage":
                 parts.append(item.get("text") or "")
+                if on_part and parts[-1].strip():
+                    on_part(parts[-1].strip())
             elif method == "error":
                 raise ValueError(f"codex turn failed: {params.get('error') or params}")
             elif method == "turn/completed":

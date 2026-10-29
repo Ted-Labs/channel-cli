@@ -113,7 +113,7 @@ class Store:
             row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY seq LIMIT 1").fetchone()
             if not row:
                 return None
-            self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,attempts=attempts+1 WHERE id=?",
+            self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,answer=NULL,attempts=attempts+1 WHERE id=?",
                             (time.time(), row["id"]))
             self.event(row["id"], "running")
         return self.get(row["id"])
@@ -152,6 +152,17 @@ class Store:
                 raise ValueError(f"cannot {action} a {job['state']} job")
             self.event(job_id, action)
         return self.get(job_id)
+
+    def part(self, job_id, text):
+        # 중간 답 하나가 끝날 때마다 남긴다. 채널은 'part' 이벤트를 새 말풍선으로 보인다.
+        # answer 는 끝까지 모은 답이고, 끝날 때 finish 가 전체로 덮는다.
+        with self.db:
+            row = self.db.execute("SELECT answer FROM jobs WHERE id=? AND state='running'", (job_id,)).fetchone()
+            if row is None:
+                return
+            answer = "\n".join(p for p in (row["answer"], text) if p)
+            self.db.execute("UPDATE jobs SET answer=? WHERE id=?", (answer, job_id))
+            self.event(job_id, "part")
 
     def set_turn(self, job_id, thread, turn):
         with self.db:
