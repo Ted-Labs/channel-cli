@@ -125,7 +125,7 @@ def worker(store, args):
             except KeyboardInterrupt:
                 emit(store.finish(job, "interrupted", error="worker interrupted; inspect logs before retry"), args)
                 return 130
-            except body.Interrupted:
+            except (body.Interrupted, getattr(__import__('channel_cli.agy_body', fromlist=['Interrupted']), 'Interrupted')):
                 result = store.finish(job, "interrupted", error="stopped by interrupt")
             except subprocess.TimeoutExpired:
                 result = store.finish(job, "failed", error=f"agent exceeded {args.timeout:g}s timeout; inspect logs before retry")
@@ -169,11 +169,16 @@ def main():
             emit(store.get(args.job_id), args)
         elif args.command == "interrupt":
             job = store.get(args.job_id)
-            turn = store.turn(job["id"]) if job["state"] == "running" else None
-            if not turn:
-                raise ValueError(f"no running daemon turn for job {job['id'][:8]} ({job['state']})")
-            body.interrupt(*turn)
-            emit(store.get(job["id"]), args)
+            if job["agent"] == "agy-body":
+                from . import agy_body
+                agy_body.interrupt()
+                emit(store.get(job["id"]), args)
+            else:
+                turn = store.turn(job["id"]) if job["state"] == "running" else None
+                if not turn:
+                    raise ValueError(f"no running daemon turn for job {job['id'][:8]} ({job['state']})")
+                body.interrupt(*turn)
+                emit(store.get(job["id"]), args)
         elif args.command == "steer":
             job = store.get(args.job_id)
             if job["state"] != "queued":

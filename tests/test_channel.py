@@ -285,7 +285,9 @@ class ChannelTests(unittest.TestCase):
         human = subprocess.run([sys.executable, '-m', 'channel_cli', 'agents'], env=self.env,
                                capture_output=True, text=True, timeout=5, cwd=ROOT)
         self.assertEqual(human.returncode, 0)
-        self.assertIn('에이전트 4개 설치됨', human.stdout)
+        with patch.dict(os.environ, self.env):
+            installed_count = sum(1 for a in adapters.discover() if a['installed'])
+        self.assertIn(f'에이전트 {installed_count}개 설치됨', human.stdout)
         self.assertNotIn('unchecked', human.stdout)
         self.assertNotIn(str(self.bin), human.stdout)
         verbose = subprocess.run([sys.executable, '-m', 'channel_cli', 'agents', '-v'], env=self.env,
