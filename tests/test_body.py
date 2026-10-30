@@ -25,6 +25,7 @@ class FakeDaemon:
         self.cwds, self.updated = {}, {}
         self.release, self.steers, self.started = threading.Event(), [], threading.Event()
         self.prompts, self.methods = [], []
+        self.fresh_params = None
         self.server = socket.socket(socket.AF_UNIX)
         cwd = os.getcwd()
         os.chdir(os.path.dirname(path))  # bind long paths relative to their directory
@@ -82,6 +83,9 @@ class FakeDaemon:
                 result = {}
                 if method == "thread/loaded/list":
                     result = {"data": self.loaded}
+                elif method == "thread/start":
+                    self.fresh_params = message["params"]
+                    result = {"thread": {"id": "thread-fresh", "sessionId": "thread-fresh"}}
                 elif method == "thread/read":
                     tid = message["params"]["threadId"]
                     active = bool(self.busy) and tid not in self.ephemeral and "thread/resume" in self.methods
@@ -135,6 +139,26 @@ class BodyTests(unittest.TestCase):
         self.assertEqual((reply.text, reply.session), ("사과", "thread-1"))
         self.assertEqual(d.prompts, ["처음 암호?"])
         self.assertEqual(d.methods[:5], ["initialize", "initialized", "thread/loaded/list", "thread/read", "thread/resume"])
+
+    def test_session_is_persisted_before_turn_starts(self):
+        d = self.daemon()
+        observed = []
+        reply = body.run("continue work", 5, d.path, on_session=lambda session: observed.append((session, list(d.methods))) )
+        self.assertEqual(reply.session, "thread-1")
+        self.assertEqual(observed[0][0], "thread-1")
+        self.assertIn("thread/resume", observed[0][1])
+        self.assertNotIn("turn/start", observed[0][1])
+        self.assertIn("turn/start", d.methods)
+
+    def test_fresh_starts_and_uses_new_persistent_thread(self):
+        d = self.daemon(answer="fresh answer")
+        sessions = []
+        reply = body.run("new topic", 5, d.path, session="thread-1", fresh=True, on_session=sessions.append)
+        self.assertEqual((reply.text, reply.session), ("fresh answer", "thread-fresh"))
+        self.assertEqual(d.prompts, ["new topic"])
+        self.assertEqual(d.methods[:6], ["initialize", "initialized", "thread/read", "thread/start", "thread/read", "turn/start"])
+        self.assertEqual(d.fresh_params["cwd"], os.getcwd())
+        self.assertEqual(sessions, ["thread-fresh"])
 
     def test_long_socket_path(self):
         deep = self.base / ("d" * 60) / ("e" * 60)
@@ -223,6 +247,26 @@ class BodyTests(unittest.TestCase):
         with patch.dict(os.environ, {"CHANNEL_CODEX_SOCKET": d.path}):
             self.assertEqual(adapters.run("codex-body", "hi", None, None, 5, self.base / "logs").text, "answer")
             self.assertTrue(next(a for a in adapters.discover() if a["id"] == "codex-body")["installed"])
+
+    def test_worker_passes_fresh_flag_and_persists_new_session_before_turn_completion(self):
+        with tempfile.TemporaryDirectory() as home:
+            store = Store(home)
+            try:
+                job = store.enqueue('atrium-web:pixie', 'dev', 'codex-body', 'fresh', 'fresh prompt', fresh=True)
+                args = SimpleNamespace(command='worker', json=True, verbose=False, once=True,
+                                       drain=False, timeout=10, poll=0.01)
+                def run(agent, prompt, cwd, session, timeout, logs, **kwargs):
+                    self.assertEqual((agent, prompt, session), ('codex-body', 'fresh prompt', None))
+                    self.assertTrue(kwargs['fresh'])
+                    kwargs['on_session']('thread-created')
+                    self.assertEqual(store.get(job['id'])['fresh_started'], 1)
+                    self.assertEqual(store.session(job), 'thread-created')
+                    return adapters.Reply('fresh answer', 'thread-created')
+                with patch('channel_cli.cli.adapters.run', side_effect=run), redirect_stdout(io.StringIO()):
+                    self.assertEqual(worker(store, args), 0)
+                self.assertEqual(store.get(job['id'])['state'], 'done')
+            finally:
+                store.close()
 
 
 class BodyCliTests(unittest.TestCase):

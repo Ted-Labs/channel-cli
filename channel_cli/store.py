@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS jobs (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
  channel TEXT NOT NULL, room TEXT NOT NULL, agent TEXT NOT NULL,
  message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+ fresh INTEGER NOT NULL DEFAULT 0, fresh_started INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'queued', answer TEXT, error TEXT,
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
@@ -55,6 +56,11 @@ class Store:
             try:
                 self.db.execute("PRAGMA journal_mode=WAL")
                 self.db.executescript(SCHEMA)
+                columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
+                if "fresh" not in columns:
+                    self.db.execute("ALTER TABLE jobs ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0")
+                if "fresh_started" not in columns:
+                    self.db.execute("ALTER TABLE jobs ADD COLUMN fresh_started INTEGER NOT NULL DEFAULT 0")
                 break
             except sqlite3.OperationalError as exc:
                 code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
@@ -85,15 +91,17 @@ class Store:
         self.db.execute("INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)",
                         (job_id, kind, time.time(), json.dumps(job, ensure_ascii=False)))
 
-    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None):
+    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False):
         with self.db:
+            if fresh and agent not in ("codex-body", "agy-body"):
+                raise ValueError("fresh sessions are supported for codex-body and agy-body only")
             # Take the write lock before checking room binding / idempotency.
             self.db.execute("BEGIN IMMEDIATE")
             if message_id:
                 existing = self.db.execute("SELECT * FROM jobs WHERE channel=? AND room=? AND message_id=?",
                                            (channel, room, message_id)).fetchone()
                 if existing:
-                    if existing["text"] != text or existing["agent"] != agent:
+                    if existing["text"] != text or existing["agent"] != agent or existing["fresh"] != int(fresh):
                         raise ValueError("message-id already used with different content or agent")
                     return dict(existing)
             bound = self.db.execute("SELECT cwd FROM rooms WHERE channel=? AND room=?", (channel, room)).fetchone()
@@ -112,9 +120,9 @@ class Store:
                 target = str(workspace)
             self.db.execute("INSERT OR IGNORE INTO rooms VALUES(?,?,?)", (channel, room, target))
             job_id = uuid.uuid4().hex
-            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,created)
-                            VALUES(?,?,?,?,?,?,?,?,?)""",
-                            (job_id, channel, room, agent, message_id, text, prompt, target, time.time()))
+            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,created)
+                            VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), time.time()))
             self.event(job_id, "queued")
         return self.get(job_id)
 
@@ -134,6 +142,16 @@ class Store:
         row = self.db.execute("SELECT native_id FROM sessions WHERE channel=? AND room=? AND agent=?",
                               (job["channel"], job["room"], job["agent"])).fetchone()
         return row["native_id"] if row else None
+
+    def set_session(self, job, session, consume_fresh=False):
+        if not session:
+            raise ValueError("native session ID is required")
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)",
+                            (job["channel"], job["room"], job["agent"], session))
+            if consume_fresh:
+                self.db.execute("UPDATE jobs SET fresh_started=1 WHERE id=? AND state='running' AND attempts=?",
+                                (job["id"], job["attempts"]))
 
     def finish(self, job, state, answer=None, error=None, session=None):
         with self.db:

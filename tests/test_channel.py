@@ -152,6 +152,31 @@ class ChannelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.enqueue('web', 'r', 'claude', 'hi', 'hi', cwd=str(self.base))
 
+    def test_fresh_body_session_is_recorded_once_and_reused_on_retry(self):
+        job = self.store.enqueue('web', 'fresh-room', 'codex-body', 'new', 'new', fresh=True)
+        self.assertEqual(job['fresh'], 1)
+        claimed = self.store.claim()
+        self.store.set_session(claimed, 'thread-fresh', consume_fresh=True)
+        self.assertEqual(self.store.get(job['id'])['fresh'], 1)
+        self.assertEqual(self.store.get(job['id'])['fresh_started'], 1)
+        self.assertEqual(self.store.session(claimed), 'thread-fresh')
+        self.store.finish(claimed, 'interrupted', error='controlled retry')
+        self.store.change(job['id'], 'retry')
+        retried = self.store.claim()
+        self.assertEqual((retried['fresh'], retried['fresh_started']), (1, 1))
+        self.assertEqual(self.store.session(retried), 'thread-fresh')
+
+    def test_fresh_is_limited_to_supported_live_bodies(self):
+        for agent in ('claude-body', 'claude'):
+            with self.subTest(agent=agent), self.assertRaisesRegex(ValueError, 'fresh sessions are supported'):
+                self.store.enqueue('web', 'fresh-room', agent, 'new', 'new', fresh=True)
+
+    def test_cli_send_persists_fresh_for_live_body(self):
+        result = self.cli('send', '--agent', 'codex-body', '--literal', '--fresh', 'new conversation')
+        self.assertEqual(json.loads(result.stdout)['fresh'], 1)
+        bad = self.cli('send', '--agent', 'claude-body', '--literal', '--fresh', 'not supported', ok=False)
+        self.assertIn('--fresh requires codex-body or agy-body', bad.stdout + bad.stderr)
+
     def test_fifo_and_recovery(self):
         a, b = self.enqueue(), self.enqueue(text='second')
         self.assertEqual(self.store.claim()['id'], a['id'])

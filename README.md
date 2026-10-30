@@ -40,7 +40,7 @@ atrium usage
 - `claude`, `codex`, `agy`, `opencode`를 PATH에서 탐색한다. `@gemini`와 `--agent gemini`는 `agy`의 별칭이며 구 Gemini CLI를 실행하지 않는다. 설치 탐색은 인증·구독·모델 가용성을 검사하지 않는다. 실제 호출 오류는 해당 작업의 실패 상태와 로그로 확인한다.
 - `@claude 질문` 또는 `--agent claude`로 에이전트를 지정한다. 표식이 없으면 `CHANNEL_DEFAULT_AGENT`를 사용하며, 기본값도 없으면 입력을 거부한다. 알 수 없는 멘션이나 서로 다른 에이전트의 복수 멘션은 거부한다. 이메일 안의 `@`는 표식으로 읽지 않는다.
 - 큐 전체는 하나의 FIFO이며 워커 하나만 실행한다. 각 요청은 순차 처리된다. 에이전트별 병렬 처리는 첫 버전에 포함하지 않는다.
-- 세션은 `(channel, room, agent)`별로 분리하고 각 CLI의 네이티브 세션 ID로 이어 간다. 에이전트끼리 대화 맥락을 자동 공유하지 않는다.
+- 세션은 `(channel, room, agent)`별 네이티브 ID로 이어 간다. Codex는 방에서 아직 세션을 저장하지 않았을 때만 `CHANNEL_CODEX_THREAD`·`CHANNEL_CODEX_CWD` 또는 유일한 활성 본체 thread를 초기 세션으로 찾는다. 에이전트끼리 대화 맥락을 자동 공유하지 않는다.
 - 방은 첫 메시지 때 작업 디렉터리에 연결된다. `--cwd /path/to/project`를 생략하면 상태 폴더 아래에 전용 디렉터리를 만든다. 기존 방의 디렉터리를 바꿀 때는 새 방을 사용한다.
 - `--message-id`는 `(channel, room)` 범위의 중복 방지 키다. 같은 키와 본문·에이전트로 다시 넣으면 기존 작업을 돌려준다. 내용이 바뀌면 오류다. 키 없이 보내면 매번 새 작업이다.
 
@@ -51,6 +51,7 @@ channel send --channel telegram --room topic-7 --message-id telegram-456 \
 channel worker                 # 대기하며 계속 처리
 channel worker --drain         # 현재 큐가 빌 때 종료
 channel worker --once --timeout 120
+channel send --agent codex-body --literal --fresh '새 주제로 시작해줘'
 printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 ```
 
@@ -59,11 +60,12 @@ printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 `@codex-body`는 새 Codex를 띄우지 않고 Codex app-server 데몬이 쥔 세션에 말을 넣는다. 그 세션을 `codex --remote unix://<소켓>`으로 연 TUI에는 넣은 말과 답이 실시간으로 보이고 기억도 하나로 이어진다. 같은 세션 ID로 `codex exec resume`을 걸면 Codex가 `already has an active writer`로 거부하므로 이 길을 쓴다.
 
 - 소켓: `CHANNEL_CODEX_SOCKET`, 없으면 `$CODEX_HOME/app-server-control/app-server-control.sock`. `agents`는 소켓이 있으면 설치로 표시한다.
-- 세션: `CHANNEL_CODEX_THREAD`, 다음으로 `CHANNEL_CODEX_CWD`(그 폴더의 가장 최근 세션), 없으면 데몬에 열린 세션 중 임시(ephemeral)가 아닌 것이 정확히 하나일 때 그것을 쓴다. 모든 방이 같은 세션을 공유한다.
+- 초기 세션 선택: `CHANNEL_CODEX_THREAD`, 다음으로 `CHANNEL_CODEX_CWD`(그 폴더의 가장 최근 세션), 없으면 데몬에 열린 세션 중 임시(ephemeral)가 아닌 것이 정확히 하나일 때 그것을 쓴다. 이후에는 방별 저장 ID로 `thread/resume`한다.
 - 세션이 일하는 중(`active`)이면 끝날 때까지 기다렸다가 넣는다. 제한 시간 안에 끝나지 않으면 실패로 남긴다.
 - `initialize` → `thread/resume` → `turn/start`로 넣고, 그 turn의 `agentMessage`를 `turn/completed`까지 모아 답으로 저장한다. 시작한 turn은 `turn` 이벤트로 알린다.
 - `channel interrupt <작업>`: 실행 중인 작업의 turn을 `turn/interrupt`로 멈춘다. 작업은 `interrupted`가 된다.
 - `channel steer <대기 작업>`: 같은 본체의 실행 중 작업에 대기 말을 추가한다. Codex는 실행 중 turn에 직접 얹고, Cora·Gemini는 현재 응답 뒤 같은 세션에서 후속 turn으로 처리한 다음 원 작업을 완료한다. 추가 지시 job은 `steered`가 되고, 원 작업의 최종 결과만 완료로 게시한다. 실행 중 작업이 없으면 오류를 내고 대기 상태를 보존한다.
+- `channel send --fresh --agent codex-body|agy-body`: 이 요청부터 새 본체 대화로 시작한다. Codex는 app-server `thread/start`로 새 persistent thread를 만들고, Gemini는 본체 tmux 세션에서 `/clear`를 실행한다. 새 ID를 요청 완료 전에 저장하므로 실패 뒤 `retry`는 같은 새 대화에서 이어 간다. Cora 본체는 기존 MCP 세션을 유지하며 fresh 대상이 아니다.
 
 ## 채널 연결 계약
 
@@ -81,14 +83,15 @@ printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 channel events --json --channel web --after 0 --limit 100
 channel jobs --state failed
 channel cancel <queued-job-id>
+channel interrupt <running-body-job-id>
 channel retry <failed-or-interrupted-job-id>
 ```
 
 ## 실패와 실행 권한
 
-기본 제한 시간은 요청당 300초다. 시간 초과나 SIGINT/SIGTERM은 실행한 프로세스 그룹을 종료한다. 다음 워커가 시작되면 완료 기록 없이 남은 `running` 작업을 `interrupted`로 바꾼다. 실패·중단 작업은 자동 재시도하지 않는다. 명시적 재시도 전 원본 로그와 실행 결과를 확인해야 한다. 완료된 turn의 native session ID는 SQLite에 보존하므로 명시적으로 재시도하면 해당 세션에서 이어 간다. 실행 도중 종료되어 아직 저장되지 않은 turn은 자동 재개하지 않는다. 에이전트가 작업을 수행한 직후 결과 저장 전에 종료되었을 수 있으므로 외부 부작용에 대한 exactly-once 실행은 보장하지 않는다. 실패 이후의 다른 대기 요청은 계속 처리된다.
+기본 제한 시간은 요청당 300초다. 시간 초과나 SIGINT/SIGTERM은 실행한 프로세스 그룹을 종료한다. 다음 워커가 시작되면 완료 기록 없이 남은 `running` 작업을 `interrupted`로 바꾼다. 실패·중단 작업은 자동 재시도하지 않는다. 명시적 재시도 전 원본 로그와 실행 결과를 확인해야 한다. 완료된 turn의 native session ID는 SQLite에 보존하므로 명시적으로 재시도하면 해당 세션에서 이어 간다. 실행 도중 종료된 turn은 자동으로 이어 하지 않는다. 에이전트가 작업을 수행한 직후 결과 저장 전에 종료되었을 수 있으므로 외부 부작용에 대한 exactly-once 실행은 보장하지 않는다. 실패 이후의 다른 대기 요청은 계속 처리된다.
 
-SIGKILL·OS 장애는 종료 처리를 실행할 수 없으며 자식 에이전트가 남을 수 있다. 이 경우 잔존 프로세스를 확인한 뒤 워커를 재실행한다. 실행 중 작업을 취소하는 명령은 없으며 워커에 SIGINT/SIGTERM을 보낸다. `cancel`은 대기 작업에만 적용된다.
+SIGKILL·OS 장애는 종료 처리를 실행할 수 없으며 자식 에이전트가 남을 수 있다. 이 경우 잔존 프로세스를 확인한 뒤 워커를 재실행한다. `interrupt`는 실행 중인 live-body 작업만 대상으로 한다. 별도 CLI 프로세스로 실행한 에이전트는 작업별 중단 명령이 없어 worker 신호로 종료한다. `cancel`은 대기 작업에만 적용된다.
 
 셸을 거치지 않고 실행하며 권한 우회 플래그는 사용하지 않는다. Claude·Codex·OpenCode는 프롬프트를 stdin으로 전달한다. `agy`는 현재 print 인터페이스가 요구하는 `--print=<본문>` 인자로 전달하므로 실행 중 로컬 프로세스 인자에 본문이 보일 수 있다. Claude는 `--strict-mcp-config`로 기존 MCP poller를 중복 시작하지 않는다. Codex 새 세션은 `read-only`, `agy`는 `plan`으로 시작한다. Claude·OpenCode는 각 도구의 기존 비대화형 권한 정책을 따른다. CLI 전체에 공통된 샌드박스를 제공하지 않는다. 에이전트 실행은 로컬 사용자의 인증과 설정을 사용한다.
 
@@ -108,4 +111,6 @@ python3 -m unittest discover -s tests -v
 
 `claude-body`는 Atrium 웹 서버의 `/body-runs`를 통해 기존 Cora MCP 브리지에 전달한다. `ATRIUM_TOKEN` 또는 notify-token 파일로 인증하며, `CORPUS_WEB_URL`을 사용한다. 브리지 ACK가 없으면 전달 성공으로 처리하지 않는다. 최종 답은 `atrium reply --agent cora --run-id <id> --text '답'`로 제출하며, 워커가 공통 이벤트로 웹에 게시한다. `--run-id`는 reply에만 사용할 수 있다.
 
-claude-body·agy-body의 추가 지시는 현재 응답을 끊지 않고 같은 본체 세션의 후속 turn으로 처리한다. 공통 전달의 새 세션 시작은 제공하지 않는다. Cora body-run 상태는 웹 서버 상태 디렉터리에 저장하며, 서버 재시작 뒤 접수된 요청의 polling·최종 제출을 이어 가고 미전달 요청을 웹소켓 재연결 시 다시 전달한다. claim 후 알림 접수 확인 전 서버가 종료된 경계에서는 중복 전달 가능성이 있어 exactly-once 전달을 보장하지 않는다. 기존 본체 세션은 유지하며 저장된 `cora` 세션 표시는 연결 정보일 뿐 새 CLI 세션 ID가 아니다. agy-body는 고유 요청 표식으로 해당 본체의 답만 수집한다.
+codex-body는 app-server turn steer를, claude-body·agy-body는 현재 응답 뒤 같은 본체 세션에서 후속 turn을 사용한다. `codex-body`·`agy-body`는 `--fresh` 새 대화를 지원하고, `claude-body`는 기존 Cora 세션을 유지한다. Cora body-run 상태는 웹 서버 상태 디렉터리에 저장하며, 서버 재시작 뒤 접수된 요청의 polling·최종 제출을 이어 가고 미전달 요청을 웹소켓 재연결 시 다시 전달한다. claim 후 알림 접수 확인 전 서버가 종료된 경계에서는 중복 전달 가능성이 있어 exactly-once 전달을 보장하지 않는다. 저장된 `cora` 세션 표시는 연결 정보일 뿐 새 CLI 세션 ID가 아니다. agy-body는 고유 요청 표식으로 해당 본체의 답만 수집한다.
+
+하위 에이전트(clone)는 각 본체 런타임이 내부에서 만들고 관리한다. Atrium은 공통 큐 본체 작업의 시작·중단·추가 지시·최종 결과를 다루며, 본체 내부 clone의 생명주기·진행률·결과 합치기를 공통 API로 제공하지 않는다.
