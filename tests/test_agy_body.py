@@ -20,7 +20,7 @@ class AgyBodyTests(unittest.TestCase):
                 agy_body.run("hello", session="test-session")
 
     def test_interrupt_sends_escape(self):
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
             agy_body.interrupt("test-session")
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]

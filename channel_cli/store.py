@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS turns (
  job_id TEXT PRIMARY KEY, thread TEXT NOT NULL, turn TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS interrupt_requests (
+ job_id TEXT NOT NULL, attempt INTEGER NOT NULL, requested REAL NOT NULL,
+ PRIMARY KEY(job_id, attempt)
+);
 CREATE TABLE IF NOT EXISTS events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
  type TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL
@@ -67,7 +71,10 @@ class Store:
             row = matches[0] if matches else None
         if row is None:
             raise ValueError(f"unknown job: {job_id}")
-        return dict(row)
+        job = dict(row)
+        if job["state"] == "running" and self.interrupt_requested(job["id"], job["attempts"]):
+            job["interrupt_requested"] = True
+        return job
 
     def event(self, job_id, kind):
         job = self.get(job_id)
@@ -115,6 +122,7 @@ class Store:
                 return None
             self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,answer=NULL,attempts=attempts+1 WHERE id=?",
                             (time.time(), row["id"]))
+            self.db.execute("DELETE FROM turns WHERE job_id=?", (row["id"],))
             self.event(row["id"], "running")
         return self.get(row["id"])
 
@@ -125,6 +133,12 @@ class Store:
 
     def finish(self, job, state, answer=None, error=None, session=None):
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            current = self.get(job["id"])
+            if current["attempts"] != job["attempts"] or current["state"] not in ("queued", "running") or current["state"] == "queued" and job["attempts"] > 0:
+                return current
+            if state == "done" and self.interrupt_requested(job["id"], job["attempts"]):
+                state, answer, error = "interrupted", None, "stopped by interrupt"
             if session:
                 self.db.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)",
                                 (job["channel"], job["room"], job["agent"], session))
@@ -153,12 +167,26 @@ class Store:
             self.event(job_id, action)
         return self.get(job_id)
 
+    def interrupt_requested(self, job_id, attempt):
+        return self.db.execute("SELECT 1 FROM interrupt_requests WHERE job_id=? AND attempt=?", (job_id, attempt)).fetchone() is not None
+
+    def request_interrupt(self, job_id):
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            job = self.get(job_id)
+            if job["state"] != "running":
+                raise ValueError(f"cannot interrupt a {job['state']} job")
+            inserted = self.db.execute("INSERT OR IGNORE INTO interrupt_requests VALUES(?,?,?)", (job["id"], job["attempts"], time.time())).rowcount
+            if inserted:
+                self.event(job["id"], "interrupt_requested")
+        return self.get(job["id"])
+
     def part(self, job_id, text):
         # 중간 답 하나가 끝날 때마다 남긴다. 채널은 'part' 이벤트를 새 말풍선으로 보인다.
         # answer 는 끝까지 모은 답이고, 끝날 때 finish 가 전체로 덮는다.
         with self.db:
-            row = self.db.execute("SELECT answer FROM jobs WHERE id=? AND state='running'", (job_id,)).fetchone()
-            if row is None:
+            row = self.db.execute("SELECT answer, attempts FROM jobs WHERE id=? AND state='running'", (job_id,)).fetchone()
+            if row is None or self.interrupt_requested(job_id, row["attempts"]):
                 return
             answer = "\n".join(p for p in (row["answer"], text) if p)
             self.db.execute("UPDATE jobs SET answer=? WHERE id=?", (answer, job_id))

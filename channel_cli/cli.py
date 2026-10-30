@@ -121,12 +121,13 @@ def worker(store, args):
                 reply = adapters.run(job["agent"], job["prompt"], job["cwd"], store.session(job),
                                      args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
                                      on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
-                                     on_part=lambda text, j=job["id"]: store.part(j, text))
+                                     on_part=lambda text, j=job["id"]: store.part(j, text),
+                                     should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
                 result = store.finish(job, "done", answer=reply.text, session=reply.session)
             except KeyboardInterrupt:
                 emit(store.finish(job, "interrupted", error="worker interrupted; inspect logs before retry"), args)
                 return 130
-            except (body.Interrupted, getattr(__import__('channel_cli.agy_body', fromlist=['Interrupted']), 'Interrupted')):
+            except adapters.Interrupted:
                 result = store.finish(job, "interrupted", error="stopped by interrupt")
             except subprocess.TimeoutExpired:
                 result = store.finish(job, "failed", error=f"agent exceeded {args.timeout:g}s timeout; inspect logs before retry")
@@ -175,18 +176,18 @@ def main():
             emit(store.get(args.job_id), args)
         elif args.command == "interrupt":
             job = store.get(args.job_id)
-            if job["agent"] == "claude-body":
-                raise ValueError("claude-body interrupt is not supported yet")
-            if job["agent"] == "agy-body":
-                from . import agy_body
-                agy_body.interrupt()
-                emit(store.get(job["id"]), args)
-            else:
-                turn = store.turn(job["id"]) if job["state"] == "running" else None
-                if not turn:
-                    raise ValueError(f"no running daemon turn for job {job['id'][:8]} ({job['state']})")
+            if job["state"] != "running":
+                raise ValueError(f"cannot interrupt a {job['state']} job")
+            if job["agent"] not in adapters.BODIES:
+                raise ValueError("interrupt supports live body jobs only")
+            turn = store.turn(job["id"])
+            if job["agent"] == "codex-body" and turn:
                 body.interrupt(*turn)
                 emit(store.get(job["id"]), args)
+            else:
+                # The owning worker observes this attempt-bound request and stops
+                # its own transport; no signal is sent to a different task.
+                emit(store.request_interrupt(job["id"]), args)
         elif args.command == "steer":
             job = store.get(args.job_id)
             if job["state"] != "queued":

@@ -7,10 +7,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .adapters import Reply
+from .adapters import Reply, Interrupted
 
 
-def run(prompt, timeout=300):
+def run(prompt, timeout=300, should_interrupt=None):
+    if should_interrupt and should_interrupt():
+        raise Interrupted("stopped before delivering to Cora")
     token = os.environ.get('ATRIUM_TOKEN') or os.environ.get('ARTRIUM_TOKEN')
     if not token:
         try:
@@ -49,6 +51,7 @@ def run(prompt, timeout=300):
         request('POST', '/body-runs', {'id': run_id, 'agent': 'cora', 'prompt': prompt, 'timeout': timeout, 'meta': meta})
         created = True
         ack_deadline = min(deadline, time.monotonic() + 10)
+        stop_sent = False
         while True:
             state = request('GET', path)
             if state.get('state') == 'done':
@@ -56,11 +59,23 @@ def run(prompt, timeout=300):
                 if not isinstance(answer, str) or not answer.strip():
                     raise ValueError('Cora body returned an empty answer')
                 return Reply(answer, 'cora')
+            if state.get('state') == 'interrupted':
+                raise Interrupted('Cora confirmed interruption')
             if state.get('state') == 'failed':
                 raise ValueError(state.get('error') or 'Cora body failed')
-            if state.get('state') not in ('pending', 'accepted'):
+            if should_interrupt and should_interrupt() and not stop_sent:
+                try:
+                    request("POST", path + "/interrupt")
+                except ValueError as exc:
+                    # Completion can win between the poll and stop request. Read
+                    # its terminal result; never signal another body run.
+                    if str(exc) != 'Cora body transport HTTP 409':
+                        raise
+                stop_sent = True
+                continue
+            if state.get('state') not in ('pending', 'claimed', 'accepted', 'stopping'):
                 raise ValueError('Cora body returned an invalid state')
-            if state['state'] == 'pending' and time.monotonic() >= ack_deadline:
+            if state['state'] in ('pending', 'claimed') and time.monotonic() >= ack_deadline:
                 raise ValueError('Cora MCP bridge did not acknowledge delivery')
             time.sleep(min(0.2, max(0, deadline - time.monotonic())))
     finally:

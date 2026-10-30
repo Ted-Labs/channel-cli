@@ -14,6 +14,10 @@ BODIES = ("codex-body", "agy-body", "claude-body")
 ALIASES = {"gemini": "agy", "gemini-body": "agy-body", "cora-body": "claude-body"}
 
 
+class Interrupted(Exception):
+    """The owned live-body request was stopped."""
+
+
 @dataclass
 class Reply:
     text: str
@@ -119,17 +123,17 @@ def terminate(proc):
             pass
 
 
-def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_part=None):
+def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_part=None, should_interrupt=None):
     if agent == "claude-body":
         from . import claude_body
-        return claude_body.run(prompt, timeout)
+        return claude_body.run(prompt, timeout, **({"should_interrupt": should_interrupt} if should_interrupt else {}))
     if agent == "codex-body":
         # The live thread is shared by every room; the stored session is informational.
         from . import body
-        return body.run(prompt, timeout, on_turn=on_turn, on_part=on_part)
+        return body.run(prompt, timeout, on_turn=on_turn, on_part=on_part, **({"should_interrupt": should_interrupt} if should_interrupt else {}))
     if agent == "agy-body":
         from . import agy_body
-        return agy_body.run(prompt, timeout, on_turn=on_turn, on_part=on_part)
+        return agy_body.run(prompt, timeout, on_turn=on_turn, on_part=on_part, **({"should_interrupt": should_interrupt} if should_interrupt else {}))
     executable = shutil.which(agent)
     if not executable:
         raise ValueError(f"agent executable not found: {agent}")

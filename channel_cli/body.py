@@ -18,8 +18,7 @@ def default_socket():
     return os.environ.get("CHANNEL_CODEX_SOCKET") or str(Path(home) / "app-server-control" / "app-server-control.sock")
 
 
-class Interrupted(Exception):
-    """The turn was stopped with turn/interrupt."""
+from .adapters import Interrupted
 
 
 class Connection:
@@ -129,9 +128,11 @@ def pick_thread(conn, notes):
     return live[0]
 
 
-def wait_idle(conn, thread, deadline, notes):
+def wait_idle(conn, thread, deadline, notes, should_interrupt=None):
     """Wait while the session is busy with a turn typed in the TUI or sent by someone else."""
     while True:
+        if should_interrupt and should_interrupt():
+            raise Interrupted("stopped while waiting for the body")
         status = (conn.request("thread/read", {"threadId": thread}, notes).get("thread", {}).get("status") or {}).get("type")
         if status != "active":
             return
@@ -141,9 +142,11 @@ def wait_idle(conn, thread, deadline, notes):
         time.sleep(1)
 
 
-def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None):
+def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None, should_interrupt=None):
     """Start a turn in the daemon's live thread and wait for it to finish."""
     from .adapters import Reply
+    if should_interrupt and should_interrupt():
+        raise Interrupted("stopped before starting a turn")
     deadline = time.monotonic() + timeout
     conn = Connection(socket_path or default_socket(), timeout)
     notes = []
@@ -157,7 +160,9 @@ def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None):
             # A freshly opened TUI thread has no rollout file until its first turn; it is already loaded, so start the turn.
             if "no rollout found" not in str(e):
                 raise
-        wait_idle(conn, thread, deadline, notes)
+        wait_idle(conn, thread, deadline, notes, should_interrupt)
+        if should_interrupt and should_interrupt():
+            raise Interrupted("stopped before starting a turn")
         notes.clear()
         turn = conn.request("turn/start", {"threadId": thread, "input": [{"type": "text", "text": prompt}]},
                             notes).get("turn", {}).get("id")
@@ -166,7 +171,11 @@ def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None):
         owned_turns = {turn} if turn else set()
         parts = []
         pending_parts = {}
+        stop_sent = False
         while True:
+            if should_interrupt and should_interrupt() and not stop_sent:
+                interrupt(thread, turn, socket_path)
+                stop_sent = True
             message = notes.pop(0) if notes else conn.receive()
             if time.monotonic() > deadline:
                 raise TimeoutError(f"codex turn did not finish within {timeout:g}s")

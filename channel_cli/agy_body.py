@@ -12,11 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .adapters import Reply
-
-
-class Interrupted(Exception):
-    """The turn was stopped with interrupt."""
+from .adapters import Reply, Interrupted
 
 
 def default_session():
@@ -92,18 +88,24 @@ def request_transcript(marker):
 
 def interrupt(session=None):
     session = session or default_session()
-    subprocess.run([tmux_bin(), "send-keys", "-t", session, "Escape"], check=False)
+    proc = subprocess.run([tmux_bin(), "send-keys", "-t", session, "Escape"], check=False)
+    if proc.returncode:
+        raise ValueError("failed to send interruption to Gemini")
 
 
-def run(prompt, timeout=300, session=None, on_turn=None, on_part=None):
+def run(prompt, timeout=300, session=None, on_turn=None, on_part=None, should_interrupt=None):
     session = session or default_session()
     if not is_online(session):
         raise ValueError(f"tmux session '{session}' is not online")
 
     deadline = time.monotonic() + timeout
 
-    # Wait if session is busy
+    # Wait if session is busy; cancellation here must not stop that other work.
+    if should_interrupt and should_interrupt():
+        raise Interrupted("stopped before delivering to Gemini")
     while is_busy(session):
+        if should_interrupt and should_interrupt():
+            raise Interrupted("stopped while waiting for Gemini")
         if time.monotonic() > deadline:
             raise TimeoutError(f"session '{session}' remained busy for {timeout}s")
         time.sleep(0.5)
@@ -132,9 +134,34 @@ def run(prompt, timeout=300, session=None, on_turn=None, on_part=None):
     if on_turn:
         on_turn(session, f"turn-{int(time.time())}")
 
+    stop_at = None
+    idle_hits = 0
+    def stopping():
+        nonlocal stop_at, idle_hits
+        if not should_interrupt or not should_interrupt():
+            return False
+        # A unique marker proves the request belongs to this worker before Escape.
+        if stop_at is None:
+            if not request_transcript(marker):
+                return True
+            interrupt(session)
+            stop_at = time.monotonic()
+        if is_busy(session):
+            idle_hits = 0
+        else:
+            idle_hits += 1
+            if idle_hits >= 2 and time.monotonic() - stop_at >= 0.5:
+                raise Interrupted("Gemini confirmed interruption")
+        if time.monotonic() - stop_at > 15:
+            raise ValueError("Gemini did not confirm interruption")
+        return True
+
     # Wait for turn to start (becomes busy)
     started = False
     for _ in range(20):
+        if stopping():
+            time.sleep(0.1)
+            continue
         time.sleep(0.3)
         if is_busy(session):
             started = True
@@ -146,6 +173,9 @@ def run(prompt, timeout=300, session=None, on_turn=None, on_part=None):
         if time.monotonic() > deadline:
             raise TimeoutError(f"turn in '{session}' did not finish within {timeout}s")
 
+        if stopping():
+            time.sleep(0.1)
+            continue
         match = request_transcript(marker)
         if match:
             transcript, min_line = match
