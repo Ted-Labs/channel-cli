@@ -17,6 +17,24 @@ channel result <job-id>
 
 설치하지 않고 소스 폴더에서 `python3 -m channel_cli`로도 실행할 수 있다. 기본 출력은 터미널에서 읽는 표와 답변 본문이다. 채널 연동에는 `--json`을 붙인다. JSON 모드에서 명령의 stdout은 JSON이며, 상시 워커는 완료·실패 결과를 JSONL로 출력한다. 에이전트의 원본 출력은 stdout에 섞지 않는다. `--json`은 하위 명령 앞뒤 모두 지정할 수 있다. `channel agents --verbose`는 실행 파일 경로까지 표시한다. 작업은 화면에 표시한 8자리 ID로도 조회·취소·재시도할 수 있으며, 앞자리가 겹치면 더 긴 ID를 사용한다.
 
+
+## 하나의 Atrium CLI
+
+에이전트 실행 큐와 웹 대화 기능을 `atrium` 하나로 제공한다. 웹 동작은 이 패키지의 `channel_cli.web`에서 관리하며 Sentinel에는 별도 구현을 두지 않는다. 웹 명령에는 실행 중인 Atrium 웹 서버가 필요하다.
+
+```sh
+atrium send --agent codex --room my-test '프로젝트 구조를 설명해줘'
+atrium jobs
+atrium result <job-id>
+atrium reply --agent pixie --topic dev --reply-to <message-id> --text '확인했어요'
+atrium share ./result.png '작업 결과' --agent pixie --topic dev
+atrium usage
+```
+
+`send`는 에이전트 작업을 큐에 넣고, `reply`는 웹에 답장을 게시한다. `--home`/`CHANNEL_HOME`은 큐 저장 위치를 정하며 웹 로그인·주소 설정과는 별개다. 웹 요청은 큐 DB를 만들지 않는다. 웹 인증은 `ATRIUM_TOKEN`, 없으면 기존 notify-token 파일을 읽고, 서버 주소는 `CORPUS_WEB_URL`을 사용한다. 기존 `ARTRIUM_TOKEN`·`ARTRIUM_PUBLIC_URL`도 호환된다. 토큰 값은 출력하지 않는다.
+
+기존 `channel`, `atrium-cli`, `artrium-cli`는 모두 같은 CLI의 호환 명령이다. 업데이트할 때 이 패키지를 먼저 설치한 뒤 Sentinel을 반영한다. Sentinel의 `channel/atrium`·`channel/atrium-cli`도 이 설치를 호출하는 호환 진입점이며 `ATRIUM_CLI`로 실행 파일 위치를 지정할 수 있다. 새 설치에서는 PATH에 `atrium`이 있어야 하며 a1-2 기존 경로 `~/channel-cli/.venv/bin/atrium`도 탐색한다.
+
 ## 큐와 대화
 
 - `claude`, `codex`, `agy`, `opencode`를 PATH에서 탐색한다. `@gemini`와 `--agent gemini`는 `agy`의 별칭이며 구 Gemini CLI를 실행하지 않는다. 설치 탐색은 인증·구독·모델 가용성을 검사하지 않는다. 실제 호출 오류는 해당 작업의 실패 상태와 로그로 확인한다.
@@ -57,7 +75,7 @@ printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 3. 채널은 `events --json --channel web --after <cursor>`를 호출한다. 이벤트는 `seq`, `job_id`, `type`, `created`, `payload`를 가진다. `payload`는 그 시점의 작업 전체이며 `channel`, `room`, `message_id`, `agent`, `state`, `answer`, `error`를 포함한다.
 4. `done` 이벤트의 `answer`를 원래 방에 답장한다. `failed`·`interrupted`는 상태를 표시한다. 처리한 마지막 `seq`를 채널이 저장하고 다음 조회의 `--after`로 사용한다.
 
-이벤트는 삭제하지 않고 저장한다. 전송과 커서 저장 사이에 채널이 꺼지면 재전송될 수 있으므로 채널도 `job_id + event.seq`로 중복을 처리해야 한다. CLI가 외부 채널에 직접 게시하지는 않는다.
+이벤트는 삭제하지 않고 저장한다. 전송과 커서 저장 사이에 채널이 꺼지면 재전송될 수 있으므로 채널도 `job_id + event.seq`로 중복을 처리해야 한다. 큐 워커가 외부 채널에 자동 게시하지는 않는다. 웹에 직접 게시할 때는 같은 CLI의 `reply` 등 웹 명령을 사용한다.
 
 ```sh
 channel events --json --channel web --after 0 --limit 100

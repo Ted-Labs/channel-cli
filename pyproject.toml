@@ -12,6 +12,8 @@ dependencies = []
 [project.scripts]
 atrium = "channel_cli.cli:main"
 channel = "channel_cli.cli:main"
+atrium-cli = "channel_cli.cli:main"
+artrium-cli = "channel_cli.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["channel_cli*"]

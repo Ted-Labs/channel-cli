@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import adapters, body
+from . import adapters, body, web
 from .store import Store
 from .output import emit as display
 
@@ -58,7 +58,7 @@ def bounded(value):
 
 
 def parser():
-    p = argparse.ArgumentParser(description="설치된 에이전트를 공통 메시지 큐로 호출합니다.")
+    p = argparse.ArgumentParser(prog="atrium", description="에이전트 실행 큐와 웹 대화를 하나의 Atrium CLI로 관리합니다.")
     p.add_argument('--json', action='store_true', help='채널 연동용 JSON 출력')
     p.add_argument("--home", default=os.environ.get("CHANNEL_HOME", str(Path.home() / ".local/state/channel")))
     sub = p.add_subparsers(dest="command", required=True)
@@ -91,6 +91,7 @@ def parser():
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--limit", type=bounded, default=100)
     events.add_argument("--channel")
+    web.register(sub)
     for command_parser in sub.choices.values():
         command_parser.add_argument('--json', action='store_true', default=argparse.SUPPRESS,
                                     help='채널 연동용 JSON 출력')
@@ -139,7 +140,12 @@ def worker(store, args):
 def main():
     # Restrict newly created database/WAL/log files to the current OS user.
     os.umask(0o077)
-    args = parser().parse_args()
+    command_parser = parser()
+    args = command_parser.parse_args()
+    if args.command in web.COMMANDS:
+        return web.run(args, command_parser)
+    if args.command in ("claude", "cora"):
+        return web.change(args.command, args.model_args)
     store = None
     old_term = signal.getsignal(signal.SIGTERM)
     try:
