@@ -142,7 +142,8 @@ def wait_idle(conn, thread, deadline, notes, should_interrupt=None):
         time.sleep(1)
 
 
-def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None, should_interrupt=None):
+def run(prompt, timeout, socket_path=None, session=None, fresh=False, on_session=None,
+        on_turn=None, on_part=None, should_interrupt=None):
     """Start a turn in the daemon's live thread and wait for it to finish."""
     from .adapters import Reply
     if should_interrupt and should_interrupt():
@@ -153,13 +154,26 @@ def run(prompt, timeout, socket_path=None, on_turn=None, on_part=None, should_in
     try:
         conn.request("initialize", {"clientInfo": {"name": "channel-cli", "version": "0.1.0"}}, notes)
         conn.send({"jsonrpc": "2.0", "method": "initialized"})
-        thread = pick_thread(conn, notes)
-        try:
-            conn.request("thread/resume", {"threadId": thread}, notes)
-        except ValueError as e:
-            # A freshly opened TUI thread has no rollout file until its first turn; it is already loaded, so start the turn.
-            if "no rollout found" not in str(e):
-                raise
+        if fresh:
+            base_thread = session or pick_thread(conn, notes)
+            base = conn.request("thread/read", {"threadId": base_thread}, notes).get("thread", {})
+            params = {"cwd": base.get("cwd") or os.environ.get("CHANNEL_CODEX_CWD") or os.getcwd()}
+            for key in ("model", "reasoningEffort", "approvalPolicy", "sandbox"):
+                if base.get(key) is not None:
+                    params[key] = base[key]
+            thread = (conn.request("thread/start", params, notes).get("thread") or {}).get("id")
+            if not thread:
+                raise ValueError("Codex app-server started a fresh thread without an ID")
+        else:
+            thread = session or pick_thread(conn, notes)
+            try:
+                conn.request("thread/resume", {"threadId": thread}, notes)
+            except ValueError as e:
+                # A freshly opened TUI thread has no rollout file until its first turn; it is already loaded, so start the turn.
+                if "no rollout found" not in str(e):
+                    raise
+        if on_session:
+            on_session(thread)
         wait_idle(conn, thread, deadline, notes, should_interrupt)
         if should_interrupt and should_interrupt():
             raise Interrupted("stopped before starting a turn")

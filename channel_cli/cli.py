@@ -72,6 +72,7 @@ def parser():
     send.add_argument('--literal', action='store_true', help='--agent를 사용하며 본문의 @표식을 해석하지 않음')
     send.add_argument("--cwd", help="bind the room to an existing directory on its first message")
     send.add_argument("--message-id", help="channel delivery key for idempotent enqueue")
+    send.add_argument("--fresh", action="store_true", help="start a new live-body conversation before this request")
     worker = sub.add_parser("worker", help="run the single global FIFO consumer; emits terminal jobs as JSONL")
     worker.add_argument("--once", action="store_true", help="process at most one job")
     worker.add_argument("--drain", action="store_true", help="exit when no jobs remain")
@@ -123,6 +124,9 @@ def worker(store, args):
                 reply = adapters.run(job["agent"], job["prompt"], job["cwd"], session,
                                      args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
                                      on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
+                                     on_session=lambda native, j=job: store.set_session(
+                                         j, native, consume_fresh=bool(j.get("fresh") and not j.get("fresh_started"))),
+                                     fresh=bool(job.get("fresh") and not job.get("fresh_started")),
                                      on_part=lambda text, j=job["id"]: store.part(j, text),
                                      should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
                 while True:
@@ -137,6 +141,8 @@ def worker(store, args):
                         reply = adapters.run(job["agent"], followup["prompt"], job["cwd"], session,
                                              args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
                                              on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
+                                             on_session=lambda native, j=job: store.set_session(j, native),
+                                             fresh=False,
                                              on_part=lambda text, j=job["id"]: store.part(j, text),
                                              should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
                     except (adapters.Interrupted, subprocess.TimeoutExpired, OSError, ValueError) as exc:
@@ -190,7 +196,10 @@ def main():
                 agent, prompt = adapters.ALIASES.get(args.agent, args.agent), text.strip()
             else:
                 agent, prompt = route(text, args.agent, os.environ.get("CHANNEL_DEFAULT_AGENT"))
-            emit(store.enqueue(args.channel, args.room, agent, text, prompt, args.cwd, args.message_id), args)
+            if args.fresh and agent not in adapters.BODIES[:2]:
+                raise ValueError("--fresh requires codex-body or agy-body")
+            emit(store.enqueue(args.channel, args.room, agent, text, prompt, args.cwd,
+                               args.message_id, fresh=args.fresh), args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt

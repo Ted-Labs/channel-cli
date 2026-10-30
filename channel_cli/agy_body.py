@@ -93,7 +93,17 @@ def interrupt(session=None):
         raise ValueError("failed to send interruption to Gemini")
 
 
-def run(prompt, timeout=300, session=None, on_turn=None, on_part=None, should_interrupt=None):
+def clear_session(session, on_session=None):
+    proc = subprocess.run([tmux_bin(), "send-keys", "-t", session, "/clear", "Enter"], check=False)
+    if proc.returncode:
+        raise ValueError("failed to start a fresh Gemini conversation")
+    time.sleep(0.4)
+    if on_session:
+        on_session(session)
+
+
+def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
+        on_turn=None, on_part=None, should_interrupt=None):
     session = session or default_session()
     if not is_online(session):
         raise ValueError(f"tmux session '{session}' is not online")
@@ -109,6 +119,11 @@ def run(prompt, timeout=300, session=None, on_turn=None, on_part=None, should_in
         if time.monotonic() > deadline:
             raise TimeoutError(f"session '{session}' remained busy for {timeout}s")
         time.sleep(0.5)
+
+    if fresh:
+        clear_session(session, on_session)
+    elif on_session:
+        on_session(session)
 
     marker = '[Atrium request ' + str(uuid.uuid4()) + ']'
     prompt = marker + '\n' + prompt
