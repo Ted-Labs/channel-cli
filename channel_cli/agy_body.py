@@ -3,13 +3,13 @@
 Pastes into the tmux session using bracketed paste and monitors the transcript
 and tmux pane until the model completes its turn.
 """
-import glob
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from .adapters import Reply
@@ -46,13 +46,6 @@ def is_busy(session=None):
     return bool(re.search(r"esc to (interrupt|cancel)|Press up to edit queued|Working\.\.\.|Running command|Loading\.\.\.", pane, re.I))
 
 
-def latest_transcript():
-    home = Path(os.environ.get("GEMINI_HOME") or Path.home())
-    brains = sorted(glob.glob(str(home / ".gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl")),
-                     key=os.path.getmtime)
-    return Path(brains[-1]) if brains else None
-
-
 def extract_latest_answer(transcript_path, min_line=0):
     if not transcript_path or not transcript_path.exists():
         return ""
@@ -73,6 +66,30 @@ def extract_latest_answer(transcript_path, min_line=0):
     return ""
 
 
+def request_transcript(marker):
+    """Find the transcript containing this injection, never a merely recent session."""
+    home = Path(os.environ.get("GEMINI_HOME") or Path.home())
+    for path in home.glob(".gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl"):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            found = None
+            for index, line in enumerate(lines):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") == "USER_INPUT":
+                    if marker in str(row.get("content", "")):
+                        found = index + 1
+                    elif found is not None:
+                        raise ValueError("Gemini received another input before this request completed")
+            if found is not None:
+                return path, found
+        except OSError:
+            continue
+    return None
+
+
 def interrupt(session=None):
     session = session or default_session()
     subprocess.run([tmux_bin(), "send-keys", "-t", session, "Escape"], check=False)
@@ -91,14 +108,10 @@ def run(prompt, timeout=300, session=None, on_turn=None, on_part=None):
             raise TimeoutError(f"session '{session}' remained busy for {timeout}s")
         time.sleep(0.5)
 
-    transcript = latest_transcript()
+    marker = '[Atrium request ' + str(uuid.uuid4()) + ']'
+    prompt = marker + '\n' + prompt
+    transcript = None
     min_line = 0
-    if transcript and transcript.exists():
-        try:
-            with transcript.open("r", encoding="utf-8", errors="replace") as f:
-                min_line = sum(1 for _ in f)
-        except Exception:
-            min_line = 0
 
     # Paste prompt into tmux session
     buffer_name = f"channel-agy-{os.getpid()}"
@@ -133,19 +146,22 @@ def run(prompt, timeout=300, session=None, on_turn=None, on_part=None):
         if time.monotonic() > deadline:
             raise TimeoutError(f"turn in '{session}' did not finish within {timeout}s")
 
-        cur_answer = extract_latest_answer(transcript, min_line)
+        match = request_transcript(marker)
+        if match:
+            transcript, min_line = match
+        cur_answer = extract_latest_answer(transcript, min_line) if transcript else ""
         if cur_answer and cur_answer != last_answer:
             last_answer = cur_answer
             if on_part:
                 on_part(cur_answer)
 
         # Check if idle again after started
-        if started and not is_busy(session):
+        if (started or last_answer) and not is_busy(session):
             # Extra settling pause to make sure transcript flushed
             time.sleep(0.5)
             final_answer = extract_latest_answer(transcript, min_line) or last_answer
-            if not final_answer:
-                final_answer = "(작업 완료)"
+            if not final_answer or is_busy(session):
+                continue
             return Reply(final_answer, session)
 
         time.sleep(0.5)

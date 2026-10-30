@@ -18,6 +18,7 @@ def add_arguments(p):
     p.add_argument("--agent", default=os.environ.get("CORPUS_PERSONA", ""))
     p.add_argument("--topic")
     p.add_argument("--reply-to")
+    p.add_argument("--run-id", help="Return the final answer of a queued body run")
     p.add_argument("--message-id")
     p.add_argument("--text")
     p.add_argument("--emoji")
@@ -63,6 +64,7 @@ def change(who, rest):
 
 
 def run(a, p):
+    if a.run_id and a.action != "reply": p.error("--run-id is only for reply")
     token = (os.environ.get("ATRIUM_TOKEN") or os.environ.get("ARTRIUM_TOKEN"))
     if not token:
         try: token = (pathlib.Path.home()/".claude/channels/corpus-web/notify-token").read_text().strip()
@@ -203,7 +205,7 @@ def run(a, p):
         raise SystemExit()
     if a.subject or a.body or a.relay_thread or a.since is not None or a.put or a.goal: p.error("positional/thread options are only for relay/deliver/log/draft")
     body = {"action": a.action, "agent": a.agent}
-    for src, dst in [(a.topic,"topic"),(a.reply_to,"replyTo"),(a.message_id,"messageId"),(a.text,"text"),(a.emoji,"emoji")]:
+    for src, dst in [(a.topic,"topic"),(a.reply_to,"replyTo"),(a.message_id,"messageId"),(a.text,"text"),(a.emoji,"emoji"),(a.run_id,"runId")]:
         if src is not None: body[dst] = src
     if a.buttons is not None: body["buttons"] = json.loads(a.buttons)
     print(json.dumps(request("/agent-action", "POST", body), ensure_ascii=False))

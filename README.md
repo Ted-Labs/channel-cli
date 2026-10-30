@@ -101,3 +101,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 검사는 임시 상태 폴더와 가짜 실행 파일로 큐·어댑터·세션·동시 접근·실패·종료 흐름을 실행한다. 실제 CLI의 인증과 출력 호환성은 각 환경에서 따로 확인한다.
+
+## 세 본체의 공통 큐
+
+`claude-body`(별칭 `cora-body`), `codex-body`, `agy-body`(별칭 `gemini-body`)는 실행 중인 본체에 요청하고 동일한 작업 완료 이벤트를 반환한다. Claude/Codex/agy를 새로 실행하는 기존 `claude/codex/agy`와 구분한다.
+
+`claude-body`는 Atrium 웹 서버의 `/body-runs`를 통해 기존 Cora MCP 브리지에 전달한다. `ATRIUM_TOKEN` 또는 notify-token 파일로 인증하며, `CORPUS_WEB_URL`을 사용한다. 브리지 ACK가 없으면 전달 성공으로 처리하지 않는다. 최종 답은 `atrium reply --agent cora --run-id <id> --text '답'`로 제출하며, 워커가 공통 이벤트로 웹에 게시한다. `--run-id`는 reply에만 사용할 수 있다.
+
+이 단계에서 claude-body의 중단·추가 지시, 공통 전달의 새 세션 시작·서버 재시작 후 운송 재개는 제공하지 않는다. 기존 본체 세션은 유지하며 저장된 `cora` 세션 표시는 연결 정보일 뿐 새 CLI 세션 ID가 아니다. agy-body는 고유 요청 표식으로 해당 본체의 답만 수집한다.

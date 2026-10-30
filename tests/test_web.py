@@ -120,6 +120,14 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.requests[-1][0:2], ('PUT', '/threads/t1/draft'))
         self.assertEqual(self.requests[-1][3], {'text': 'saved content', 'by': 'pixie', 'goal': 'goal'})
 
+    def test_run_id_callback_is_forwarded_without_queue_side_effect(self):
+        self.cli('reply', '--agent', 'cora', '--run-id', 'run-123', '--text', 'final')
+        self.assertEqual(self.requests[-1][3]['runId'], 'run-123')
+        self.assertFalse((self.home / 'queue').exists())
+        self.requests.clear()
+        self.cli('usage', '--run-id', 'invalid', expected=2)
+        self.assertEqual(self.requests, [])
+
     def test_missing_auth_fails_without_creating_queue(self):
         self.env.pop('ATRIUM_TOKEN')
         self.cli('reply', '--agent', 'pixie', '--text', 'hello', expected=2)

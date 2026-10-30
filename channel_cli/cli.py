@@ -175,6 +175,8 @@ def main():
             emit(store.get(args.job_id), args)
         elif args.command == "interrupt":
             job = store.get(args.job_id)
+            if job["agent"] == "claude-body":
+                raise ValueError("claude-body interrupt is not supported yet")
             if job["agent"] == "agy-body":
                 from . import agy_body
                 agy_body.interrupt()
@@ -191,6 +193,8 @@ def main():
                 raise ValueError(f"cannot steer a {job['state']} job")
             if job["agent"] not in adapters.BODIES:
                 raise ValueError(f"steer needs a daemon-backed agent, not {job['agent']}")
+            if job["agent"] == "claude-body":
+                raise ValueError("claude-body steer is not supported yet")
             current = store.running(job["agent"])
             turn = store.turn(current["id"]) if current else None
             if not turn:

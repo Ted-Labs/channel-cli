@@ -8,10 +8,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-AGENTS = ("claude", "codex", "agy", "opencode", "codex-body", "agy-body")
+AGENTS = ("claude", "codex", "agy", "opencode", "codex-body", "agy-body", "claude-body")
 # Agents reached through a daemon socket or tmux body instead of a new process per message.
-BODIES = ("codex-body", "agy-body")
-ALIASES = {"gemini": "agy", "gemini-body": "agy-body"}
+BODIES = ("codex-body", "agy-body", "claude-body")
+ALIASES = {"gemini": "agy", "gemini-body": "agy-body", "cora-body": "claude-body"}
 
 
 @dataclass
@@ -21,6 +21,8 @@ class Reply:
 
 
 def locate(agent):
+    if agent == "claude-body":
+        return shutil.which("claude")
     if agent == "codex-body":
         from .body import default_socket
         path = default_socket()
@@ -118,6 +120,9 @@ def terminate(proc):
 
 
 def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_part=None):
+    if agent == "claude-body":
+        from . import claude_body
+        return claude_body.run(prompt, timeout)
     if agent == "codex-body":
         # The live thread is shared by every room; the stored session is informational.
         from . import body
