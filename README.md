@@ -63,7 +63,7 @@ printf '%s' '@claude 여러 줄 메시지' | channel send --room notes -
 - 세션이 일하는 중(`active`)이면 끝날 때까지 기다렸다가 넣는다. 제한 시간 안에 끝나지 않으면 실패로 남긴다.
 - `initialize` → `thread/resume` → `turn/start`로 넣고, 그 turn의 `agentMessage`를 `turn/completed`까지 모아 답으로 저장한다. 시작한 turn은 `turn` 이벤트로 알린다.
 - `channel interrupt <작업>`: 실행 중인 작업의 turn을 `turn/interrupt`로 멈춘다. 작업은 `interrupted`가 된다.
-- `channel steer <대기 작업>`: 대기 중인 말을 같은 에이전트의 실행 중 turn에 `turn/steer`로 바로 얹는다. 대기 작업은 `steered`가 되고, 답은 실행 중이던 작업의 답에 함께 담긴다. 실행 중 turn이 없으면 오류를 내고 대기로 둔다.
+- `channel steer <대기 작업>`: 같은 본체의 실행 중 작업에 대기 말을 추가한다. Codex는 실행 중 turn에 직접 얹고, Cora·Gemini는 현재 응답 뒤 같은 세션에서 후속 turn으로 처리한 다음 원 작업을 완료한다. 추가 지시 job은 `steered`가 되고, 원 작업의 최종 결과만 완료로 게시한다. 실행 중 작업이 없으면 오류를 내고 대기 상태를 보존한다.
 
 ## 채널 연결 계약
 
@@ -86,7 +86,7 @@ channel retry <failed-or-interrupted-job-id>
 
 ## 실패와 실행 권한
 
-기본 제한 시간은 요청당 300초다. 시간 초과나 SIGINT/SIGTERM은 실행한 프로세스 그룹을 종료한다. 다음 워커가 시작되면 완료 기록 없이 남은 `running` 작업을 `interrupted`로 바꾼다. 실패·중단 작업은 자동 재시도하지 않는다. 명시적 재시도 전 원본 로그와 실행 결과를 확인해야 한다. 에이전트가 작업을 수행한 직후 결과 저장 전에 종료되었을 수 있으므로 외부 부작용에 대한 exactly-once 실행은 보장하지 않는다. 실패 이후의 다른 대기 요청은 계속 처리된다.
+기본 제한 시간은 요청당 300초다. 시간 초과나 SIGINT/SIGTERM은 실행한 프로세스 그룹을 종료한다. 다음 워커가 시작되면 완료 기록 없이 남은 `running` 작업을 `interrupted`로 바꾼다. 실패·중단 작업은 자동 재시도하지 않는다. 명시적 재시도 전 원본 로그와 실행 결과를 확인해야 한다. 완료된 turn의 native session ID는 SQLite에 보존하므로 명시적으로 재시도하면 해당 세션에서 이어 간다. 실행 도중 종료되어 아직 저장되지 않은 turn은 자동 재개하지 않는다. 에이전트가 작업을 수행한 직후 결과 저장 전에 종료되었을 수 있으므로 외부 부작용에 대한 exactly-once 실행은 보장하지 않는다. 실패 이후의 다른 대기 요청은 계속 처리된다.
 
 SIGKILL·OS 장애는 종료 처리를 실행할 수 없으며 자식 에이전트가 남을 수 있다. 이 경우 잔존 프로세스를 확인한 뒤 워커를 재실행한다. 실행 중 작업을 취소하는 명령은 없으며 워커에 SIGINT/SIGTERM을 보낸다. `cancel`은 대기 작업에만 적용된다.
 
@@ -108,4 +108,4 @@ python3 -m unittest discover -s tests -v
 
 `claude-body`는 Atrium 웹 서버의 `/body-runs`를 통해 기존 Cora MCP 브리지에 전달한다. `ATRIUM_TOKEN` 또는 notify-token 파일로 인증하며, `CORPUS_WEB_URL`을 사용한다. 브리지 ACK가 없으면 전달 성공으로 처리하지 않는다. 최종 답은 `atrium reply --agent cora --run-id <id> --text '답'`로 제출하며, 워커가 공통 이벤트로 웹에 게시한다. `--run-id`는 reply에만 사용할 수 있다.
 
-이 단계에서 claude-body의 중단·추가 지시, 공통 전달의 새 세션 시작·서버 재시작 후 운송 재개는 제공하지 않는다. 기존 본체 세션은 유지하며 저장된 `cora` 세션 표시는 연결 정보일 뿐 새 CLI 세션 ID가 아니다. agy-body는 고유 요청 표식으로 해당 본체의 답만 수집한다.
+claude-body·agy-body의 추가 지시는 현재 응답을 끊지 않고 같은 본체 세션의 후속 turn으로 처리한다. 공통 전달의 새 세션 시작은 제공하지 않는다. Cora body-run 상태는 웹 서버 상태 디렉터리에 저장하며, 서버 재시작 뒤 접수된 요청의 polling·최종 제출을 이어 가고 미전달 요청을 웹소켓 재연결 시 다시 전달한다. claim 후 알림 접수 확인 전 서버가 종료된 경계에서는 중복 전달 가능성이 있어 exactly-once 전달을 보장하지 않는다. 기존 본체 세션은 유지하며 저장된 `cora` 세션 표시는 연결 정보일 뿐 새 CLI 세션 ID가 아니다. agy-body는 고유 요청 표식으로 해당 본체의 답만 수집한다.

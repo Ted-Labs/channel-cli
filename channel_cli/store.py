@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS interrupt_requests (
  job_id TEXT NOT NULL, attempt INTEGER NOT NULL, requested REAL NOT NULL,
  PRIMARY KEY(job_id, attempt)
 );
+CREATE TABLE IF NOT EXISTS steer_requests (
+ source_job_id TEXT PRIMARY KEY, target_job_id TEXT NOT NULL,
+ prompt TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
  type TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL
@@ -144,11 +148,69 @@ class Store:
                                 (job["channel"], job["room"], job["agent"], session))
             self.db.execute("UPDATE jobs SET state=?,answer=?,error=?,finished=? WHERE id=?",
                             (state, answer, error, time.time(), job["id"]))
+            if state != "done":
+                self._fail_steers(job["id"], f"target job ended as {state} before applying the instruction")
             self.event(job["id"], state)
         return self.get(job["id"])
 
+    def _fail_steers(self, target_job_id, reason):
+        rows = self.db.execute("SELECT source_job_id FROM steer_requests WHERE target_job_id=? AND state IN ('pending','claimed')",
+                               (target_job_id,)).fetchall()
+        for row in rows:
+            self.db.execute("UPDATE steer_requests SET state='failed' WHERE source_job_id=?", (row["source_job_id"],))
+            self.db.execute("UPDATE jobs SET state='failed',answer=NULL,error=?,finished=? WHERE id=? AND state='steered'",
+                            (reason, time.time(), row["source_job_id"]))
+            self.event(row["source_job_id"], "failed")
+
+    def finish_or_steer(self, job, answer, session=None):
+        """Atomically finish a job or claim an instruction added before completion."""
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            current = self.get(job["id"])
+            if current["attempts"] != job["attempts"] or current["state"] != "running":
+                return {"job": current}
+            if self.interrupt_requested(job["id"], job["attempts"]):
+                self.db.execute("UPDATE jobs SET state='interrupted',answer=NULL,error='stopped by interrupt',finished=? WHERE id=?",
+                                (time.time(), job["id"]))
+                self._fail_steers(job["id"], "target job was interrupted before applying the instruction")
+                self.event(job["id"], "interrupted")
+                return {"job": self.get(job["id"])}
+            row = self.db.execute("SELECT source_job_id,prompt FROM steer_requests WHERE target_job_id=? AND state='pending' ORDER BY created LIMIT 1",
+                                  (job["id"],)).fetchone()
+            if row:
+                self.db.execute("UPDATE steer_requests SET state='claimed' WHERE source_job_id=?", (row["source_job_id"],))
+                prior = self.db.execute("SELECT answer FROM jobs WHERE id=?", (job["id"],)).fetchone()["answer"] or ""
+                if answer and not prior.endswith(answer):
+                    accumulated = "\n".join(part for part in (prior, answer) if part)
+                    self.db.execute("UPDATE jobs SET answer=? WHERE id=?", (accumulated, job["id"]))
+                    self.event(job["id"], "part")
+                return {"steer": {"id": row["source_job_id"], "prompt": row["prompt"]}}
+            if session:
+                self.db.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)",
+                                (job["channel"], job["room"], job["agent"], session))
+            self.db.execute("UPDATE jobs SET state='done',answer=?,error=NULL,finished=? WHERE id=?",
+                            (answer, time.time(), job["id"]))
+            result = self.get(job["id"])
+            self.event(job["id"], "done")
+            return {"job": result}
+
+    def complete_steer(self, source_job_id):
+        with self.db:
+            self.db.execute("UPDATE steer_requests SET state='done' WHERE source_job_id=? AND state='claimed'",
+                            (source_job_id,))
+
+    def fail_steer(self, source_job_id, reason):
+        with self.db:
+            self.db.execute("UPDATE steer_requests SET state='failed' WHERE source_job_id=? AND state='claimed'",
+                            (source_job_id,))
+            self.db.execute("UPDATE jobs SET state='failed',answer=NULL,error=?,finished=? WHERE id=? AND state='steered'",
+                            (reason, time.time(), source_job_id))
+            self.event(source_job_id, "failed")
+
     def recover(self):
         # Called only while holding the exclusive worker lock.
+        with self.db:
+            self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed'")
         rows = self.db.execute("SELECT * FROM jobs WHERE state='running'").fetchall()
         for row in rows:
             self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
@@ -206,15 +268,21 @@ class Store:
                               (agent,)).fetchone()
         return self.get(row["id"]) if row else None
 
-    def steered(self, job_id, into):
-        """A queued job whose text was added to another job's running turn."""
+    def steered(self, job_id, into, defer_prompt=None):
+        """Record an instruction as either native turn steering or a follow-up turn."""
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             job = self.get(job_id)
             if job["state"] != "queued":
                 raise ValueError(f"cannot steer a {job['state']} job")
+            target = self.get(into)
+            if target["state"] != "running" or target["agent"] != job["agent"]:
+                raise ValueError("target job is no longer running for this agent")
+            if defer_prompt is not None:
+                self.db.execute("INSERT INTO steer_requests(source_job_id,target_job_id,prompt,created) VALUES(?,?,?,?)",
+                                (job["id"], target["id"], defer_prompt, time.time()))
             self.db.execute("UPDATE jobs SET state='steered',answer=?,finished=? WHERE id=?",
-                            (f"steered into {into}", time.time(), job["id"]))
+                            (f"steered into {target['id']}", time.time(), job["id"]))
             self.event(job["id"], "steered")
         return self.get(job["id"])
 
