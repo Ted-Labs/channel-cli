@@ -118,20 +118,46 @@ def worker(store, args):
             try:
                 if not args.json:
                     print(f"실행 중 · @{job['agent']} · {job['id'][:8]}\n", flush=True)
-                reply = adapters.run(job["agent"], job["prompt"], job["cwd"], store.session(job),
+                session = store.session(job)
+                followup_id = None
+                reply = adapters.run(job["agent"], job["prompt"], job["cwd"], session,
                                      args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
                                      on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
                                      on_part=lambda text, j=job["id"]: store.part(j, text),
                                      should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
-                result = store.finish(job, "done", answer=reply.text, session=reply.session)
+                while True:
+                    outcome = store.finish_or_steer(job, reply.text, session=reply.session)
+                    if "steer" not in outcome:
+                        result = outcome["job"]
+                        break
+                    followup = outcome["steer"]
+                    followup_id = followup["id"]
+                    session = reply.session or session
+                    try:
+                        reply = adapters.run(job["agent"], followup["prompt"], job["cwd"], session,
+                                             args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
+                                             on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
+                                             on_part=lambda text, j=job["id"]: store.part(j, text),
+                                             should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
+                    except (adapters.Interrupted, subprocess.TimeoutExpired, OSError, ValueError) as exc:
+                        store.fail_steer(followup_id, str(exc)[:600])
+                        raise
+                    store.complete_steer(followup_id)
+                    followup_id = None
             except KeyboardInterrupt:
                 emit(store.finish(job, "interrupted", error="worker interrupted; inspect logs before retry"), args)
                 return 130
             except adapters.Interrupted:
+                if followup_id:
+                    store.fail_steer(followup_id, "instruction was interrupted before completion")
                 result = store.finish(job, "interrupted", error="stopped by interrupt")
             except subprocess.TimeoutExpired:
+                if followup_id:
+                    store.fail_steer(followup_id, "instruction timed out")
                 result = store.finish(job, "failed", error=f"agent exceeded {args.timeout:g}s timeout; inspect logs before retry")
             except (OSError, ValueError) as exc:
+                if followup_id:
+                    store.fail_steer(followup_id, str(exc)[:600])
                 result = store.finish(job, "failed", error=str(exc))
             emit(result, args)
             if args.once:
@@ -193,15 +219,15 @@ def main():
             if job["state"] != "queued":
                 raise ValueError(f"cannot steer a {job['state']} job")
             if job["agent"] not in adapters.BODIES:
-                raise ValueError(f"steer needs a daemon-backed agent, not {job['agent']}")
-            if job["agent"] == "claude-body":
-                raise ValueError("claude-body steer is not supported yet")
+                raise ValueError(f"steer needs a live body agent, not {job['agent']}")
             current = store.running(job["agent"])
-            turn = store.turn(current["id"]) if current else None
-            if not turn:
+            if not current:
                 raise ValueError(f"@{job['agent']} has no running turn; the job stays queued")
-            body.steer(*turn, job["prompt"])
-            emit(store.steered(job["id"], current["id"]), args)
+            mode = adapters.steer(job["agent"], store.turn(current["id"]), job["prompt"])
+            if mode == "direct":
+                emit(store.steered(job["id"], current["id"]), args)
+            else:
+                emit(store.steered(job["id"], current["id"], defer_prompt=job["prompt"]), args)
         elif args.command in ("cancel", "retry"):
             emit(store.change(args.job_id, args.command), args)
         elif args.command == "events":

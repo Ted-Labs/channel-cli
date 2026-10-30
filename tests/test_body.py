@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import socket
@@ -6,9 +7,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from channel_cli import adapters, body
+from channel_cli.cli import worker
+from channel_cli.store import Store
 
 
 class FakeDaemon:
@@ -264,3 +269,90 @@ class BodyCliTests(unittest.TestCase):
         job = self.cli("send", "--agent", "codex-body", "later")
         self.assertIn("no running turn", self.cli("steer", job["id"])["error"])
         self.assertEqual(self.cli("result", job["id"])["state"], "queued")
+
+    def test_cli_steer_cora_attaches_queued_message_to_active_job(self):
+        state = self.base / "state"
+        store = Store(state)
+        initial = store.enqueue("atrium-web:cora", "dev", "claude-body", "initial", "initial prompt")
+        running = store.claim()
+        extra = store.enqueue("atrium-web:cora", "dev", "claude-body", "extra", "additional instruction")
+        store.close()
+
+        steered = self.cli("steer", extra["id"])
+        self.assertEqual(steered["state"], "steered")
+        store = Store(state)
+        try:
+            request = store.db.execute("SELECT target_job_id,prompt,state FROM steer_requests WHERE source_job_id=?",
+                                       (extra["id"],)).fetchone()
+            self.assertEqual(tuple(request), (initial["id"], "additional instruction", "pending"))
+            self.assertEqual(store.get(running["id"])["state"], "running")
+        finally:
+            store.close()
+
+
+class DeferredSteerWorkerTests(unittest.TestCase):
+    def test_followup_runs_before_final_result_for_claude_and_agy_bodies(self):
+        for agent, session in (("claude-body", "cora"), ("agy-body", "gemini")):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as home:
+                store = Store(home)
+                try:
+                    initial = store.enqueue("atrium-web:" + agent, "dev", agent, "initial", "initial prompt")
+                    calls = []
+
+                    def run(_agent, prompt, cwd, native_session, timeout, logs, **kwargs):
+                        calls.append((prompt, native_session))
+                        if prompt == "initial prompt":
+                            extra = store.enqueue("atrium-web:" + agent, "dev", agent, "extra", "additional instruction")
+                            store.steered(extra["id"], initial["id"], defer_prompt=extra["prompt"])
+                            return adapters.Reply("first answer", session)
+                        self.assertEqual(prompt, "additional instruction")
+                        return adapters.Reply("revised answer", session)
+
+                    args = SimpleNamespace(command="worker", json=True, verbose=False, once=True,
+                                           drain=False, timeout=10, poll=0.01)
+                    with patch("channel_cli.cli.adapters.run", side_effect=run), redirect_stdout(io.StringIO()):
+                        self.assertEqual(worker(store, args), 0)
+                    result = store.get(initial["id"])
+                    self.assertEqual((result["state"], result["answer"]), ("done", "revised answer"))
+                    self.assertEqual(calls, [("initial prompt", None), ("additional instruction", session)])
+                    self.assertIn("part", [event["type"] for event in store.events(0, 100)])
+                finally:
+                    store.close()
+
+    def test_cora_and_gemini_steers_are_attached_as_followup_turns(self):
+        for agent in ("claude-body", "agy-body"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as home:
+                store = Store(home)
+                try:
+                    store.enqueue("atrium-web:" + agent, "dev", agent, "initial", "initial prompt")
+                    running = store.claim()
+                    extra = store.enqueue("atrium-web:" + agent, "dev", agent, "extra", "additional instruction")
+                    accepted = store.steered(extra["id"], running["id"], defer_prompt=extra["prompt"])
+                    self.assertEqual(accepted["state"], "steered")
+
+                    next_turn = store.finish_or_steer(running, "first answer", session="same-session")
+                    self.assertEqual(next_turn["steer"]["prompt"], "additional instruction")
+                    self.assertEqual(store.get(running["id"])["state"], "running")
+                    store.complete_steer(extra["id"])
+                    result = store.finish_or_steer(running, "revised answer", session="same-session")["job"]
+                    self.assertEqual((result["state"], result["answer"]), ("done", "revised answer"))
+                    event_types = [event["type"] for event in store.events(0, 100)]
+                    self.assertIn("part", event_types)
+                    self.assertEqual(store.get(extra["id"])["state"], "steered")
+                finally:
+                    store.close()
+
+    def test_followup_instruction_fails_visibly_when_target_fails(self):
+        with tempfile.TemporaryDirectory() as home:
+            store = Store(home)
+            try:
+                store.enqueue("atrium-web:claude-body", "dev", "claude-body", "initial", "initial prompt")
+                running = store.claim()
+                extra = store.enqueue("atrium-web:claude-body", "dev", "claude-body", "extra", "additional instruction")
+                store.steered(extra["id"], running["id"], defer_prompt=extra["prompt"])
+                store.finish(running, "failed", error="base turn failed")
+                failed = store.get(extra["id"])
+                self.assertEqual(failed["state"], "failed")
+                self.assertIn("before applying", failed["error"])
+            finally:
+                store.close()

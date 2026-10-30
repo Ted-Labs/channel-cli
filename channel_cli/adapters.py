@@ -123,6 +123,21 @@ def terminate(proc):
             pass
 
 
+def steer(agent, turn, text):
+    """Add input to a live-body job using that runtime's native control path."""
+    if agent == "codex-body":
+        if not turn:
+            raise ValueError("codex-body has no running turn; the job stays queued")
+        from . import body
+        body.steer(*turn, text)
+        return "direct"
+    if agent in ("claude-body", "agy-body"):
+        # These interactive runtimes accept a follow-up turn in the same session.
+        # The worker attaches it to the active queue job before publishing done.
+        return "followup"
+    raise ValueError(f"{agent} does not support steering")
+
+
 def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_part=None, should_interrupt=None):
     if agent == "claude-body":
         from . import claude_body
