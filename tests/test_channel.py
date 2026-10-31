@@ -1,4 +1,5 @@
 import concurrent.futures
+import io
 import json
 import os
 import subprocess
@@ -7,11 +8,13 @@ import tempfile
 import time
 import threading
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 from channel_cli import adapters
-from channel_cli.cli import route
+from channel_cli.cli import route, worker
 from channel_cli.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,6 +188,39 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.store.claim()['id'], b['id'])
         self.store.change(a['id'], 'retry')
         self.assertEqual(self.store.get(a['id'])['state'], 'queued')
+
+    def test_agent_worker_claims_its_fifo_without_waiting_for_other_agents(self):
+        cora = self.enqueue(agent='claude-body')
+        pixie = self.enqueue(agent='codex-body', text='pixie request')
+        gemini = self.enqueue(agent='agy-body', text='gemini request')
+        self.assertEqual(self.store.claim('codex-body')['id'], pixie['id'])
+        self.assertEqual(self.store.get(cora['id'])['state'], 'queued')
+        self.assertEqual(self.store.get(gemini['id'])['state'], 'queued')
+        self.assertEqual(self.store.claim('claude-body')['id'], cora['id'])
+        self.assertEqual(self.store.claim('agy-body')['id'], gemini['id'])
+
+    def test_agent_worker_recovery_leaves_other_agent_runs_untouched(self):
+        cora = self.enqueue(agent='claude-body')
+        pixie = self.enqueue(agent='codex-body', text='pixie request')
+        self.store.claim('claude-body')
+        self.store.claim('codex-body')
+        self.store.recover('claude-body')
+        self.assertEqual(self.store.get(cora['id'])['state'], 'interrupted')
+        self.assertEqual(self.store.get(pixie['id'])['state'], 'running')
+
+    def test_agent_worker_completes_pixie_without_claiming_stalled_cora(self):
+        cora = self.enqueue(agent='claude-body')
+        pixie = self.enqueue(agent='codex-body', text='pixie request')
+        self.store.claim('claude-body')
+        args = SimpleNamespace(command='worker', json=True, verbose=False, once=True,
+                               drain=False, timeout=5, poll=0.01, agent='codex-body')
+        output = io.StringIO()
+        with patch('channel_cli.cli.adapters.run', return_value=adapters.Reply('pixie answer', 'thread-1')):
+            with redirect_stdout(output):
+                worker(self.store, args)
+        self.assertEqual(json.loads(output.getvalue())['id'], pixie['id'])
+        self.assertEqual(self.store.get(pixie['id'])['state'], 'done')
+        self.assertEqual(self.store.get(cora['id'])['state'], 'running')
 
     def test_cancel_and_retry_guards(self):
         a = self.enqueue()

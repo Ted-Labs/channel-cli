@@ -126,10 +126,14 @@ class Store:
             self.event(job_id, "queued")
         return self.get(job_id)
 
-    def claim(self):
+    def claim(self, agent=None):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY seq LIMIT 1").fetchone()
+            if agent:
+                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' AND agent=? ORDER BY seq LIMIT 1",
+                                      (agent,)).fetchone()
+            else:
+                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY seq LIMIT 1").fetchone()
             if not row:
                 return None
             self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,answer=NULL,attempts=attempts+1 WHERE id=?",
@@ -225,11 +229,19 @@ class Store:
                             (reason, time.time(), source_job_id))
             self.event(source_job_id, "failed")
 
-    def recover(self):
-        # Called only while holding the exclusive worker lock.
+    def recover(self, agent=None):
+        # Called only while holding the matching worker lock(s).
         with self.db:
-            self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed'")
-        rows = self.db.execute("SELECT * FROM jobs WHERE state='running'").fetchall()
+            if agent:
+                self.db.execute("""UPDATE steer_requests SET state='pending'
+                                  WHERE state='claimed' AND target_job_id IN
+                                  (SELECT id FROM jobs WHERE state='running' AND agent=?)""", (agent,))
+            else:
+                self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed'")
+        if agent:
+            rows = self.db.execute("SELECT * FROM jobs WHERE state='running' AND agent=?", (agent,)).fetchall()
+        else:
+            rows = self.db.execute("SELECT * FROM jobs WHERE state='running'").fetchall()
         for row in rows:
             self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
 

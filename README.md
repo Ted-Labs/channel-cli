@@ -13,6 +13,8 @@ channel jobs
 channel result <job-id>
 ```
 
+`worker --agent <codex-body|agy-body|claude-body>` runs only that live body's FIFO. Separate agent workers share the global worker gate and use per-agent locks, so a delayed response from one body does not hold other bodies' queues. The default worker remains a globally exclusive FIFO consumer for manual and legacy use.
+
 `atrium`이 기본 명령이며 기존 `channel` 명령도 같은 실행 구성요소를 호출하는 호환 별칭으로 유지한다.
 
 설치하지 않고 소스 폴더에서 `python3 -m channel_cli`로도 실행할 수 있다. 기본 출력은 터미널에서 읽는 표와 답변 본문이다. 채널 연동에는 `--json`을 붙인다. JSON 모드에서 명령의 stdout은 JSON이며, 상시 워커는 완료·실패 결과를 JSONL로 출력한다. 에이전트의 원본 출력은 stdout에 섞지 않는다. `--json`은 하위 명령 앞뒤 모두 지정할 수 있다. `channel agents --verbose`는 실행 파일 경로까지 표시한다. 작업은 화면에 표시한 8자리 ID로도 조회·취소·재시도할 수 있으며, 앞자리가 겹치면 더 긴 ID를 사용한다.
