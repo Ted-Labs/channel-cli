@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+from contextlib import ExitStack
 import math
 import os
 import re
@@ -73,9 +74,10 @@ def parser():
     send.add_argument("--cwd", help="bind the room to an existing directory on its first message")
     send.add_argument("--message-id", help="channel delivery key for idempotent enqueue")
     send.add_argument("--fresh", action="store_true", help="start a new live-body conversation before this request")
-    worker = sub.add_parser("worker", help="run the single global FIFO consumer; emits terminal jobs as JSONL")
+    worker = sub.add_parser("worker", help="run a FIFO consumer; emits terminal jobs as JSONL")
     worker.add_argument("--once", action="store_true", help="process at most one job")
     worker.add_argument("--drain", action="store_true", help="exit when no jobs remain")
+    worker.add_argument("--agent", choices=adapters.BODIES, help="consume only this live-body agent's FIFO")
     worker.add_argument("--timeout", type=positive, default=300, help="seconds per agent call")
     worker.add_argument("--poll", type=positive, default=1, help="idle poll interval in seconds")
     jobs = sub.add_parser("jobs")
@@ -100,15 +102,22 @@ def parser():
 
 
 def worker(store, args):
-    # Child agents must not inherit the worker lock descriptor.
-    with (store.home / "worker.lock").open("a") as lock:
+    # Agent workers share the global gate but own separate exclusive locks. A
+    # legacy/global worker takes the gate exclusively, so old and new workers
+    # can never claim jobs concurrently during rollout.
+    worker_agent = getattr(args, "agent", None)
+    with ExitStack() as locks:
+        gate = locks.enter_context((store.home / "worker.lock").open("a"))
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("another worker is already running for this CHANNEL_HOME")
-        store.recover()
+            fcntl.flock(gate, fcntl.LOCK_SH if worker_agent else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("another worker is already running for this CHANNEL_HOME") from exc
+        if worker_agent:
+            agent_lock = locks.enter_context((store.home / f"worker-{worker_agent}.lock").open("a"))
+            fcntl.flock(agent_lock, fcntl.LOCK_EX)
+        store.recover(worker_agent)
         while True:
-            job = store.claim()
+            job = store.claim(worker_agent)
             if job is None:
                 if args.once or args.drain:
                     if args.once and not args.json:
