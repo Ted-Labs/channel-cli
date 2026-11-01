@@ -13,7 +13,7 @@ channel jobs
 channel result <job-id>
 ```
 
-`worker --agent <codex-body|agy-body|claude-body>` runs only that live body's FIFO. Separate agent workers share the global worker gate and use per-agent locks, so a delayed response from one body does not hold other bodies' queues. The default worker remains a globally exclusive FIFO consumer for manual and legacy use.
+`worker --agent <codex-body|agy-body|claude-body>` runs only that live body's priority queue. Separate agent workers share the global worker gate and use per-agent locks, so a delayed response from one body does not hold other bodies' queues. The default worker remains a globally exclusive priority consumer for manual and legacy use.
 
 `atrium`이 기본 명령이며 기존 `channel` 명령도 같은 실행 구성요소를 호출하는 호환 별칭으로 유지한다.
 
@@ -41,10 +41,10 @@ atrium usage
 
 - `claude`, `codex`, `agy`, `opencode`를 PATH에서 탐색한다. `@gemini`와 `--agent gemini`는 `agy`의 별칭이며 구 Gemini CLI를 실행하지 않는다. 설치 탐색은 인증·구독·모델 가용성을 검사하지 않는다. 실제 호출 오류는 해당 작업의 실패 상태와 로그로 확인한다.
 - `@claude 질문` 또는 `--agent claude`로 에이전트를 지정한다. 표식이 없으면 `CHANNEL_DEFAULT_AGENT`를 사용하며, 기본값도 없으면 입력을 거부한다. 알 수 없는 멘션이나 서로 다른 에이전트의 복수 멘션은 거부한다. 이메일 안의 `@`는 표식으로 읽지 않는다.
-- 큐 전체는 하나의 FIFO이며 워커 하나만 실행한다. 각 요청은 순차 처리된다. 에이전트별 병렬 처리는 첫 버전에 포함하지 않는다.
+- 큐는 priority가 높은 작업부터 처리하며, 같은 priority 안에서는 접수 순서를 지킨다. 지정하지 않은 요청은 priority 90으로 들어간다. 기본 워커 하나 또는 body별 워커가 실행한다. `send --priority 0..100`으로 명시할 수 있다.
 - 세션은 `(channel, room, agent)`별 네이티브 ID로 이어 간다. Codex는 방에서 아직 세션을 저장하지 않았을 때만 `CHANNEL_CODEX_THREAD`·`CHANNEL_CODEX_CWD` 또는 유일한 활성 본체 thread를 초기 세션으로 찾는다. 에이전트끼리 대화 맥락을 자동 공유하지 않는다.
 - 방은 첫 메시지 때 작업 디렉터리에 연결된다. `--cwd /path/to/project`를 생략하면 상태 폴더 아래에 전용 디렉터리를 만든다. 기존 방의 디렉터리를 바꿀 때는 새 방을 사용한다.
-- `--message-id`는 `(channel, room)` 범위의 중복 방지 키다. 같은 키와 본문·에이전트로 다시 넣으면 기존 작업을 돌려준다. 내용이 바뀌면 오류다. 키 없이 보내면 매번 새 작업이다.
+- `--message-id`는 `(channel, room)` 범위의 중복 방지 키다. 같은 키·본문·에이전트·priority·fresh 설정으로 다시 넣으면 기존 작업을 돌려준다. 이 값이 다르면 오류다. 키 없이 보내면 매번 새 작업이다.
 
 ```sh
 export CHANNEL_DEFAULT_AGENT=agy

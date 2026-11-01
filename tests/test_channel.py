@@ -2,6 +2,7 @@ import concurrent.futures
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from channel_cli import adapters
-from channel_cli.cli import route, worker
+from channel_cli.cli import RoutingDecision, route, worker
 from channel_cli.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,15 +100,16 @@ class ChannelTests(unittest.TestCase):
         kinds = [e['type'] for e in self.store.events(0, 100)]
         self.assertEqual(kinds.count('part'), 2)
 
-    def enqueue(self, text='hello', agent='claude', room='r', channel='web', message_id=None):
-        return self.store.enqueue(channel, room, agent, text, text, message_id=message_id)
+    def enqueue(self, text='hello', agent='claude', room='r', channel='web', message_id=None, priority=90):
+        return self.store.enqueue(channel, room, agent, text, text, message_id=message_id, priority=priority)
 
     def test_route(self):
-        self.assertEqual(route('@Claude hello'), ('claude', 'hello'))
-        self.assertEqual(route('hello a@codex.com', default='claude'), ('claude', 'hello a@codex.com'))
-        self.assertEqual(route('@codex hi @codex'), ('codex', 'hi'))
-        self.assertEqual(route('@gemini hello'), ('agy', 'hello'))
-        self.assertEqual(route('@agy hi @gemini'), ('agy', 'hi'))
+        self.assertEqual(route('@Claude hello'), RoutingDecision('claude', 'hello', 90))
+        self.assertEqual(route('hello a@codex.com', default='claude'), RoutingDecision('claude', 'hello a@codex.com', 90))
+        self.assertEqual(route('@codex hi @codex'), RoutingDecision('codex', 'hi', 90))
+        self.assertEqual(route('@gemini hello'), RoutingDecision('agy', 'hello', 90))
+        self.assertEqual(route('@agy hi @gemini'), RoutingDecision('agy', 'hi', 90))
+        self.assertEqual(route('@agy hello', priority=42), RoutingDecision('agy', 'hello', 42))
         for text in ('@unknown hi', '@claude @codex hi', '@claude', 'hi', '@claudex hi'):
             with self.assertRaises(ValueError, msg=text):
                 route(text)
@@ -121,6 +123,109 @@ class ChannelTests(unittest.TestCase):
         self.assertNotEqual(first['id'], self.enqueue(room='other', message_id='m')['id'])
         with self.assertRaises(ValueError):
             self.enqueue(text='different', message_id='m')
+
+    def test_message_id_priority_is_part_of_idempotency(self):
+        first = self.enqueue(message_id='priority-key', priority=80)
+        self.assertEqual(first['id'], self.enqueue(message_id='priority-key', priority=80)['id'])
+        with self.assertRaisesRegex(ValueError, 'priority'):
+            self.enqueue(message_id='priority-key', priority=90)
+
+    def test_retry_preserves_priority_in_job_and_event_payload(self):
+        queued = self.enqueue(priority=33)
+        running = self.store.claim()
+        failed = self.store.finish(running, 'failed', error='retry me')
+        self.assertEqual(failed['priority'], 33)
+        retried = self.store.change(queued['id'], 'retry')
+        self.assertEqual(retried['priority'], 33)
+        retry_event = self.store.events(0, 100)[-1]
+        self.assertEqual(retry_event['type'], 'retry')
+        self.assertEqual(retry_event['payload']['priority'], 33)
+        self.assertEqual(self.store.claim()['id'], queued['id'])
+
+    def test_priority_claim_order_and_fifo_tie_break(self):
+        low = self.enqueue(text='low', priority=0)
+        high_first = self.enqueue(text='high first', priority=100)
+        default = self.enqueue(text='default')
+        high_second = self.enqueue(text='high second', priority=100)
+        self.assertEqual(default['priority'], 90)
+        self.assertEqual([self.store.claim()['id'] for _ in range(4)],
+                         [high_first['id'], high_second['id'], default['id'], low['id']])
+
+    def test_priority_validation_and_cli_delivery(self):
+        for priority in (-1, 101, True, 50.5, '50'):
+            with self.subTest(priority=priority), self.assertRaises(ValueError):
+                self.enqueue(priority=priority)
+        job = json.loads(self.cli('send', '--agent', 'claude', '--priority', '7', 'urgent later').stdout)
+        self.assertEqual(job['priority'], 7)
+        invalid = self.cli('send', '--agent', 'claude', '--priority', '101', 'out of range', ok=False)
+        self.assertEqual(invalid.returncode, 2)
+
+    def test_legacy_database_migrates_priority_and_busy_timeout(self):
+        home = self.base / 'legacy-state'
+        home.mkdir()
+        path = home / 'queue.sqlite3'
+        db = sqlite3.connect(path)
+        db.executescript("""
+            CREATE TABLE jobs (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                channel TEXT NOT NULL, room TEXT NOT NULL, agent TEXT NOT NULL,
+                message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'queued', answer TEXT, error TEXT,
+                created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(channel, room, message_id)
+            );
+            INSERT INTO jobs(id,channel,room,agent,text,prompt,cwd,created)
+            VALUES('old-first','web','legacy','claude','first','first','/tmp',1.0);
+            INSERT INTO jobs(id,channel,room,agent,text,prompt,cwd,created)
+            VALUES('old-second','web','legacy','claude','second','second','/tmp',2.0);
+        """)
+        db.close()
+
+        migrated = Store(home)
+        self.assertEqual(migrated.db.execute('PRAGMA busy_timeout').fetchone()[0], 15000)
+        self.assertIsNotNone(migrated.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='jobs_queue_priority'"
+        ).fetchone())
+        self.assertEqual(migrated.get('old-first')['priority'], 90)
+        self.assertEqual(migrated.get('old-second')['priority'], 90)
+        self.assertEqual(migrated.claim()['id'], 'old-first')
+        migrated.close()
+
+        reopened = Store(home)
+        self.assertEqual(reopened.get('old-second')['priority'], 90)
+        self.assertEqual(reopened.db.execute('PRAGMA busy_timeout').fetchone()[0], 15000)
+        reopened.close()
+
+    def test_legacy_migration_is_safe_under_concurrent_open(self):
+        home = self.base / 'concurrent-legacy-state'
+        home.mkdir()
+        db = sqlite3.connect(home / 'queue.sqlite3')
+        db.executescript("""
+            CREATE TABLE jobs (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                channel TEXT NOT NULL, room TEXT NOT NULL, agent TEXT NOT NULL,
+                message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'queued', answer TEXT, error TEXT,
+                created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(channel, room, message_id)
+            );
+            INSERT INTO jobs(id,channel,room,agent,text,prompt,cwd,created)
+            VALUES('legacy-concurrent','web','legacy','claude','text','prompt','/tmp',1.0);
+        """)
+        db.close()
+        barrier = threading.Barrier(6)
+
+        def open_legacy(_):
+            barrier.wait()
+            store = Store(home)
+            try:
+                return store.get('legacy-concurrent')['priority']
+            finally:
+                store.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            priorities = list(pool.map(open_legacy, range(6)))
+        self.assertEqual(priorities, [90] * 6)
 
     def test_concurrent_enqueue_deduplicates(self):
         home = self.store.home

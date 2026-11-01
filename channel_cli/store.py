@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
  channel TEXT NOT NULL, room TEXT NOT NULL, agent TEXT NOT NULL,
  message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
  fresh INTEGER NOT NULL DEFAULT 0, fresh_started INTEGER NOT NULL DEFAULT 0,
- state TEXT NOT NULL DEFAULT 'queued', answer TEXT, error TEXT,
+ state TEXT NOT NULL DEFAULT 'queued', priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100),
+ answer TEXT, error TEXT,
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
 );
@@ -56,11 +57,21 @@ class Store:
             try:
                 self.db.execute("PRAGMA journal_mode=WAL")
                 self.db.executescript(SCHEMA)
-                columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
-                if "fresh" not in columns:
-                    self.db.execute("ALTER TABLE jobs ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0")
-                if "fresh_started" not in columns:
-                    self.db.execute("ALTER TABLE jobs ADD COLUMN fresh_started INTEGER NOT NULL DEFAULT 0")
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
+                    if "fresh" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0")
+                    if "fresh_started" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN fresh_started INTEGER NOT NULL DEFAULT 0")
+                    if "priority" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100)")
+                    self.db.execute("CREATE INDEX IF NOT EXISTS jobs_queue_priority ON jobs(state, priority DESC, seq ASC)")
+                    self.db.execute("CREATE INDEX IF NOT EXISTS jobs_agent_queue_priority ON jobs(state, agent, priority DESC, seq ASC)")
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
                 break
             except sqlite3.OperationalError as exc:
                 code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
@@ -91,7 +102,9 @@ class Store:
         self.db.execute("INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)",
                         (job_id, kind, time.time(), json.dumps(job, ensure_ascii=False)))
 
-    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False):
+    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90):
+        if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
+            raise ValueError("priority must be an integer from 0 to 100")
         with self.db:
             if fresh and agent not in ("codex-body", "agy-body"):
                 raise ValueError("fresh sessions are supported for codex-body and agy-body only")
@@ -101,8 +114,9 @@ class Store:
                 existing = self.db.execute("SELECT * FROM jobs WHERE channel=? AND room=? AND message_id=?",
                                            (channel, room, message_id)).fetchone()
                 if existing:
-                    if existing["text"] != text or existing["agent"] != agent or existing["fresh"] != int(fresh):
-                        raise ValueError("message-id already used with different content or agent")
+                    if (existing["text"] != text or existing["agent"] != agent or
+                            existing["fresh"] != int(fresh) or existing["priority"] != priority):
+                        raise ValueError("message-id already used with different content, agent, fresh flag, or priority")
                     return dict(existing)
             bound = self.db.execute("SELECT cwd FROM rooms WHERE channel=? AND room=?", (channel, room)).fetchone()
             if cwd:
@@ -120,9 +134,9 @@ class Store:
                 target = str(workspace)
             self.db.execute("INSERT OR IGNORE INTO rooms VALUES(?,?,?)", (channel, room, target))
             job_id = uuid.uuid4().hex
-            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,created)
-                            VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), time.time()))
+            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,created)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, time.time()))
             self.event(job_id, "queued")
         return self.get(job_id)
 
@@ -130,10 +144,10 @@ class Store:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if agent:
-                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' AND agent=? ORDER BY seq LIMIT 1",
+                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' AND agent=? ORDER BY priority DESC, seq ASC LIMIT 1",
                                       (agent,)).fetchone()
             else:
-                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY seq LIMIT 1").fetchone()
+                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY priority DESC, seq ASC LIMIT 1").fetchone()
             if not row:
                 return None
             self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,answer=NULL,attempts=attempts+1 WHERE id=?",

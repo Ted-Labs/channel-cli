@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from . import adapters, body, web
 from .store import Store
@@ -18,7 +19,15 @@ from .output import emit as display
 MENTION = re.compile(r"(?<!\S)@([a-zA-Z][a-zA-Z0-9_-]*)(?=$|[\s,;:!?])")
 
 
-def route(text, explicit=None, default=None):
+class RoutingDecision(NamedTuple):
+    agent: str
+    prompt: str
+    priority: int
+
+
+def route(text, explicit=None, default=None, priority=90):
+    if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
+        raise ValueError("priority must be between 0 and 100")
     mentions = list(MENTION.finditer(text))
     targets = {adapters.ALIASES.get(m.group(1).lower(), m.group(1).lower()) for m in mentions}
     unknown = targets - set(adapters.AGENTS)
@@ -37,7 +46,7 @@ def route(text, explicit=None, default=None):
     prompt = MENTION.sub("", text).strip()
     if not prompt:
         raise ValueError("message must contain text beyond the mention")
-    return agent, prompt
+    return RoutingDecision(agent, prompt, priority)
 
 
 def emit(value, args):
@@ -58,6 +67,16 @@ def bounded(value):
     return n
 
 
+def priority_value(value):
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be between 0 and 100") from exc
+    if not 0 <= n <= 100:
+        raise argparse.ArgumentTypeError("must be between 0 and 100")
+    return n
+
+
 def parser():
     p = argparse.ArgumentParser(prog="atrium", description="에이전트 실행 큐와 웹 대화를 하나의 Atrium CLI로 관리합니다.")
     p.add_argument('--json', action='store_true', help='채널 연동용 JSON 출력')
@@ -71,13 +90,14 @@ def parser():
     send.add_argument("--room", default="default")
     send.add_argument("--agent", choices=(*adapters.AGENTS, *adapters.ALIASES))
     send.add_argument('--literal', action='store_true', help='--agent를 사용하며 본문의 @표식을 해석하지 않음')
+    send.add_argument("--priority", type=priority_value, default=90, help="queue priority from 0 to 100 (default: 90)")
     send.add_argument("--cwd", help="bind the room to an existing directory on its first message")
     send.add_argument("--message-id", help="channel delivery key for idempotent enqueue")
     send.add_argument("--fresh", action="store_true", help="start a new live-body conversation before this request")
-    worker = sub.add_parser("worker", help="run a FIFO consumer; emits terminal jobs as JSONL")
+    worker = sub.add_parser("worker", help="run a priority queue consumer; emits terminal jobs as JSONL")
     worker.add_argument("--once", action="store_true", help="process at most one job")
     worker.add_argument("--drain", action="store_true", help="exit when no jobs remain")
-    worker.add_argument("--agent", choices=adapters.BODIES, help="consume only this live-body agent's FIFO")
+    worker.add_argument("--agent", choices=adapters.BODIES, help="consume only this live-body agent's priority queue")
     worker.add_argument("--timeout", type=positive, default=300, help="seconds per agent call")
     worker.add_argument("--poll", type=positive, default=1, help="idle poll interval in seconds")
     jobs = sub.add_parser("jobs")
@@ -202,13 +222,13 @@ def main():
             if args.literal:
                 if not args.agent:
                     raise ValueError('--literal requires --agent')
-                agent, prompt = adapters.ALIASES.get(args.agent, args.agent), text.strip()
+                decision = RoutingDecision(adapters.ALIASES.get(args.agent, args.agent), text.strip(), args.priority)
             else:
-                agent, prompt = route(text, args.agent, os.environ.get("CHANNEL_DEFAULT_AGENT"))
-            if args.fresh and agent not in adapters.BODIES[:2]:
+                decision = route(text, args.agent, os.environ.get("CHANNEL_DEFAULT_AGENT"), args.priority)
+            if args.fresh and decision.agent not in adapters.BODIES[:2]:
                 raise ValueError("--fresh requires codex-body or agy-body")
-            emit(store.enqueue(args.channel, args.room, agent, text, prompt, args.cwd,
-                               args.message_id, fresh=args.fresh), args)
+            emit(store.enqueue(args.channel, args.room, decision.agent, text, decision.prompt, args.cwd,
+                               args.message_id, fresh=args.fresh, priority=decision.priority), args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt
