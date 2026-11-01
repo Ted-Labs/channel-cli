@@ -80,6 +80,17 @@ def transcript_has_unfinished_work(transcript_path, min_line=0):
     latest_answer_line = -1
     latest_work_line = -1
     active_tasks = set()
+    task_id_pattern = re.compile(r"\btask-\d+\b", re.I)
+    terminal_statuses = {"DONE", "SUCCESS", "ERROR", "FAILED", "CANCELLED", "CANCELED"}
+    task_terminal_text = re.compile(
+        r"\b(completed|complete|finished|exited|succeeded|failed|cancelled|canceled)\b", re.I
+    )
+    task_status_line = re.compile(
+        r"^\s*(?:task\s+[^\r\n]+?\s+)?status\s*[:=]\s*"
+        r"(running|pending|in progress|completed|complete|finished|exited|succeeded|failed|cancelled|canceled)\b",
+        re.I | re.M,
+    )
+    preceding_tool_calls = []
 
     for index, line in enumerate(lines[min_line:], start=min_line):
         try:
@@ -90,36 +101,86 @@ def transcript_has_unfinished_work(transcript_path, min_line=0):
         row_type = str(row.get("type", "")).upper()
         if row.get("source") == "MODEL" and row_type == "PLANNER_RESPONSE":
             content = row.get("content")
-            if isinstance(content, str) and content.strip():
+            tool_calls = row.get("tool_calls")
+            if isinstance(content, str) and content.strip() and not tool_calls:
                 latest_answer_line = index
+            elif tool_calls:
+                # A planner response that dispatches a tool is progress even
+                # when it also contains readable text.
+                latest_work_line = index
+            preceding_tool_calls = tool_calls if isinstance(tool_calls, list) else []
             continue
 
-        if row_type in {"", "USER_INPUT", "SYSTEM", "SYSTEM_MESSAGE"}:
+        if row_type in {"", "USER_INPUT", "SYSTEM"}:
             continue
 
-        # Transcript tool steps (notably RUN_COMMAND) may be appended more
-        # than once as their status changes. Prefer stable task/step ids so a
-        # later terminal update clears the corresponding running entry.
         status = str(row.get("status", row.get("state", ""))).upper()
         content = row.get("content")
         text_content = content if isinstance(content, str) else ""
-        task_match = re.search(r"\b(task-[A-Za-z0-9._/-]+)", text_content, re.I)
-        task_id = (row.get("task_id") or row.get("tool_call_id") or
-                   (task_match.group(1) if task_match else None) or row.get("step_index"))
-        task_key = ("task", str(task_id)) if task_id is not None else (row_type, "")
-        background_task = isinstance(content, str) and re.search(
-            r"running as a background task|background task with task id", content, re.I
-        )
+        task_ids = {task.lower() for task in task_id_pattern.findall(text_content)}
+        explicit_id = row.get("task_id") or row.get("tool_call_id")
+        if explicit_id is not None:
+            explicit_task_ids = {task.lower() for task in task_id_pattern.findall(str(explicit_id))}
+            task_ids.update(explicit_task_ids or {str(explicit_id).lower()})
+        background_task = bool(re.search(
+            r"running as a background task|background task with task id", text_content, re.I
+        )) and row_type == "GENERIC" and status not in terminal_statuses
 
-        latest_work_line = index
+        managed_status_refs = set()
+        managed_kill_refs = set()
+        if row_type == "GENERIC":
+            for call in preceding_tool_calls:
+                if not isinstance(call, dict) or call.get("name") != "manage_task":
+                    continue
+                args = call.get("args") or {}
+                if not isinstance(args, dict):
+                    continue
+                action = str(args.get("Action", "")).strip('"').lower()
+                refs = {task.lower() for task in task_id_pattern.findall(str(args.get("TaskId", "")))}
+                if action == "status":
+                    managed_status_refs.update(refs)
+                elif action == "kill":
+                    managed_kill_refs.update(refs)
+
         if status in {"RUNNING", "PENDING", "IN_PROGRESS"} or background_task:
-            active_tasks.add(task_key)
-        elif status in {"DONE", "SUCCESS", "ERROR", "FAILED", "CANCELLED", "CANCELED"}:
-            active_tasks.discard(task_key)
+            # `step_index` is a per-row sequence number, not a stable task ID.
+            # Use the background task ID from the tool output; keep anonymous
+            # work pending if the transcript did not provide one.
+            active_tasks.update(task_ids or {f"anonymous:{index}"})
+            if row_type != "SYSTEM_MESSAGE":
+                latest_work_line = index
+        elif status in terminal_statuses:
+            poll_refs = managed_status_refs & active_tasks
+            poll_state = task_status_line.search(text_content) if poll_refs else None
+            matched_active_task = bool(task_ids & active_tasks)
+            if poll_refs:
+                # The GENERIC row's DONE status only completes the status
+                # query. The task's explicit Status field decides whether the
+                # background command itself has ended.
+                if poll_state and poll_state.group(1).lower() not in {"running", "pending", "in progress"}:
+                    active_tasks.difference_update(poll_refs)
+            elif managed_kill_refs & active_tasks and status in {"DONE", "SUCCESS"}:
+                active_tasks.difference_update(managed_kill_refs)
+            elif matched_active_task:
+                if row_type == "SYSTEM_MESSAGE" or task_terminal_text.search(text_content):
+                    active_tasks.difference_update(task_ids)
+            elif row_type == "SYSTEM_MESSAGE" and not task_ids and re.search(
+                r"\b(task|background task)\b.{0,120}\b(completed|complete|finished|exited|succeeded|failed|cancelled|canceled)\b",
+                text_content, re.I | re.S,
+            ) and len(active_tasks) == 1:
+                # Some Antigravity completion notifications omit the task ID.
+                active_tasks.clear()
+            elif row_type != "SYSTEM_MESSAGE":
+                # A tool result after the latest answer means the model still
+                # needs a chance to incorporate it into its final response.
+                latest_work_line = index
+
+        if row_type == "GENERIC":
+            preceding_tool_calls = []
 
     # A response before a tool step is progress. Wait for a newer planner
-    # response after that step, even when the tool itself has completed.
-    return bool(active_tasks) or latest_work_line > latest_answer_line
+    # response after the step, unless a background task is still active.
+    return latest_answer_line < 0 or bool(active_tasks) or latest_work_line > latest_answer_line
 
 
 def request_transcript(marker):
@@ -266,6 +327,8 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
             time.sleep(0.5)
             final_answer = extract_latest_answer(transcript, min_line) or last_answer
             if not final_answer or is_busy(session):
+                continue
+            if transcript_has_unfinished_work(transcript, min_line):
                 continue
             return Reply(final_answer, session)
 

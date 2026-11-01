@@ -80,6 +80,37 @@ class GeminiCorrelationTests(unittest.TestCase):
                 agy_body.request_transcript('[Atrium request abc]')
 
 
+class GeminiTranscriptReplayTests(unittest.TestCase):
+    def test_sanitized_recent_transcript_replay_has_no_completed_turn_false_positive(self):
+        fixture = Path(__file__).parent / 'fixtures' / 'agy-transcript-structure-replay.jsonl'
+        turns = [json.loads(line) for line in fixture.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual(len(turns), 65)
+
+        completed = pending_with_answer = unfinished_without_answer = legacy_false_positive = 0
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'transcript.jsonl'
+            for turn in turns:
+                transcript.write_text(
+                    ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in turn['rows'][1:]),
+                    encoding='utf-8',
+                )
+                actual = agy_body.transcript_has_unfinished_work(transcript)
+                self.assertEqual(actual, turn['expected_unfinished'], turn['turn'])
+                if turn['terminal_answer']:
+                    if turn['expected_unfinished']:
+                        pending_with_answer += 1
+                    else:
+                        completed += 1
+                    legacy_false_positive += bool(turn['legacy_unfinished'])
+                elif turn['expected_unfinished']:
+                    unfinished_without_answer += 1
+
+        self.assertEqual(legacy_false_positive, 13)
+        self.assertEqual(completed, 59)
+        self.assertEqual(pending_with_answer, 1)
+        self.assertEqual(unfinished_without_answer, 5)
+
+
 class GeminiFastReplyTests(unittest.TestCase):
     def test_fast_reply_completes_even_when_busy_indicator_was_never_seen(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'GEMINI_HOME': home}):
@@ -97,43 +128,86 @@ class GeminiFastReplyTests(unittest.TestCase):
             self.assertEqual(result.text, 'fast answer')
             self.assertIn('[Atrium request ', buffer['prompt'])
 
-    def test_background_command_keeps_intermediate_planner_response_from_completing_turn(self):
+    def test_b47dcb87_intermediate_response_waits_for_background_command_then_returns_final(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'GEMINI_HOME': home}):
             transcript = Path(home) / '.gemini/antigravity-cli/brain/own/.system_generated/logs/transcript.jsonl'
             transcript.parent.mkdir(parents=True)
             buffer = {}
             sleep_calls = {'count': 0}
 
-            def write_transcript(command_status, final_answer=None):
+            def write_running_transcript():
                 rows = [
                     {'type': 'USER_INPUT', 'content': buffer['prompt']},
-                    {'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': '테스트 실행 결과를 기다립니다.'},
-                    {'type': 'RUN_COMMAND', 'status': command_status, 'step_index': 2,
-                     'content': ('Tool is running as a background task with task id task-2'
-                                 if command_status == 'RUNNING' else 'Background task completed')},
+                    {'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': '테스트 실행 결과를 기다립니다.',
+                     'tool_calls': [{'name': 'run_command', 'args': {}}]},
+                    {'source': 'MODEL', 'type': 'GENERIC', 'status': 'RUNNING', 'step_index': 2,
+                     'content': 'Tool is running as a background task with task id task-2'},
                 ]
-                if final_answer:
-                    rows.append({'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': final_answer})
+                transcript.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows))
+
+            def write_completed_transcript():
+                rows = [
+                    {'type': 'USER_INPUT', 'content': buffer['prompt']},
+                    {'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': '테스트 실행 결과를 기다립니다.',
+                     'tool_calls': [{'name': 'run_command', 'args': {}}]},
+                    {'source': 'MODEL', 'type': 'GENERIC', 'status': 'RUNNING', 'step_index': 2,
+                     'content': 'Tool is running as a background task with task id task-2'},
+                    {'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE', 'step_index': 3,
+                     'content': 'Task task-2 completed.'},
+                    {'source': 'MODEL', 'type': 'PLANNER_RESPONSE',
+                     'content': '테스트가 통과했고 수정 사항을 정리했습니다.'},
+                ]
                 transcript.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows))
 
             def tmux(args, **kwargs):
                 if 'load-buffer' in args:
                     buffer['prompt'] = kwargs['input'].decode()
                 if 'send-keys' in args and args[-1] == 'Enter':
-                    write_transcript('RUNNING')
+                    write_running_transcript()
                 return Mock(returncode=0)
 
             def sleep(_seconds):
                 sleep_calls['count'] += 1
-                # The initial 0.4s settle and 20 start checks happen before
-                # monitoring. Complete the background task on the next poll.
+                # The initial settle and 20 start checks happen before
+                # monitoring. The first idle check must not return progress.
                 if sleep_calls['count'] == 22:
-                    write_transcript('DONE', '테스트가 통과했고 수정 사항을 정리했습니다.')
+                    write_completed_transcript()
 
+            parts = []
             with patch.object(agy_body, 'is_online', return_value=True), \
                  patch.object(agy_body, 'is_busy', return_value=False), \
                  patch('subprocess.run', side_effect=tmux), \
                  patch.object(agy_body.time, 'sleep', side_effect=sleep):
-                result = agy_body.run('request', timeout=5, session='gemini')
+                result = agy_body.run('request', timeout=5, session='gemini', on_part=parts.append)
 
             self.assertEqual(result.text, '테스트가 통과했고 수정 사항을 정리했습니다.')
+            self.assertEqual(parts, ['테스트 실행 결과를 기다립니다.'])
+
+    def test_unfinished_background_command_times_out_instead_of_returning_progress(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'GEMINI_HOME': home}):
+            transcript = Path(home) / '.gemini/antigravity-cli/brain/own/.system_generated/logs/transcript.jsonl'
+            transcript.parent.mkdir(parents=True)
+            buffer = {}
+
+            def tmux(args, **kwargs):
+                if 'load-buffer' in args:
+                    buffer['prompt'] = kwargs['input'].decode()
+                if 'send-keys' in args and args[-1] == 'Enter':
+                    rows = [
+                        {'type': 'USER_INPUT', 'content': buffer['prompt']},
+                        {'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': 'intermediate progress',
+                         'tool_calls': [{'name': 'run_command', 'args': {}}]},
+                        {'source': 'MODEL', 'type': 'GENERIC', 'status': 'RUNNING', 'step_index': 2,
+                         'content': 'Tool is running as a background task with task id task-7'},
+                    ]
+                    transcript.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                return Mock(returncode=0)
+
+            ticks = iter([0.0, 0.5, 1.0, 1.5, 2.5])
+            with patch.object(agy_body, 'is_online', return_value=True), \
+                 patch.object(agy_body, 'is_busy', return_value=False), \
+                 patch('subprocess.run', side_effect=tmux), \
+                 patch.object(agy_body.time, 'sleep'), \
+                 patch.object(agy_body.time, 'monotonic', side_effect=lambda: next(ticks, 2.5)):
+                with self.assertRaisesRegex(TimeoutError, 'did not finish'):
+                    agy_body.run('request', timeout=2, session='gemini')
