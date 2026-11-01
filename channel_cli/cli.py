@@ -67,6 +67,13 @@ def bounded(value):
     return n
 
 
+def nonnegative(value):
+    n = int(value)
+    if not 0 <= n <= 1_000_000:
+        raise argparse.ArgumentTypeError("must be between 0 and 1000000")
+    return n
+
+
 def priority_value(value):
     try:
         n = int(value)
@@ -103,6 +110,12 @@ def parser():
     jobs = sub.add_parser("jobs")
     jobs.add_argument("--limit", type=bounded, default=20)
     jobs.add_argument("--state", choices=("queued", "running", "done", "failed", "interrupted", "cancelled", "steered"))
+    snapshot = sub.add_parser("snapshot", help="bounded, prompt-free queue status snapshot")
+    snapshot.add_argument("--channel-prefix", default="")
+    snapshot.add_argument("--per-agent-limit", type=bounded, default=50)
+    snapshot.add_argument("--recent-limit", type=bounded, default=12)
+    snapshot.add_argument("--lane")
+    snapshot.add_argument("--offset", type=nonnegative, default=0)
     stop = sub.add_parser("interrupt", help="stop the running turn of a daemon-backed job")
     stop.add_argument("job_id")
     steer = sub.add_parser("steer", help="add a queued job's text to the running turn of the same agent now")
@@ -236,6 +249,8 @@ def main():
             raise SystemExit(worker(store, args))
         elif args.command == "jobs":
             emit(store.jobs(args.limit, args.state), args)
+        elif args.command == "snapshot":
+            emit(store.snapshot(args.channel_prefix, args.per_agent_limit, args.recent_limit, args.lane, args.offset), args)
         elif args.command == "result":
             emit(store.get(args.job_id), args)
         elif args.command == "interrupt":

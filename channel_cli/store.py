@@ -337,6 +337,92 @@ class Store:
             rows = self.db.execute("SELECT * FROM jobs ORDER BY seq DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
+    @staticmethod
+    def _snapshot_job(row):
+        # Keep this read model deliberately smaller than jobs/events: the web
+        # canvas must not receive prompts, answers, cwd, or raw error output.
+        text = re.sub(r"\s+", " ", str(row["text"] or "")).strip()
+        title = text[:96] + ("…" if len(text) > 96 else "")
+        return {
+            "id": row["id"], "lane": row["lane"], "agent": row["agent"],
+            "channel": row["channel"], "room": row["room"],
+            "message_id": row["message_id"], "state": row["state"],
+            "priority": row["priority"], "seq": row["seq"],
+            "created": row["created"], "started": row["started"],
+            "finished": row["finished"], "attempts": row["attempts"],
+            "title": title or "웹 채팅 요청",
+        }
+
+    def snapshot(self, channel_prefix="", per_agent_limit=50, recent_limit=12, only_lane=None, offset=0):
+        """Return bounded, prompt-free queue data grouped by channel lane."""
+        columns = "id,channel,room,agent,message_id,state,priority,seq,created,started,finished,attempts,text"
+        prefix = str(channel_prefix)
+        where = "channel LIKE ? ESCAPE '\\'" if prefix else "1=1"
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params = [escaped + "%"] if prefix else []
+        if only_lane is not None:
+            where += " AND channel=?"
+            params.append(prefix + str(only_lane))
+        counts = self.db.execute(
+            f"SELECT channel, state, COUNT(*) AS count FROM jobs WHERE {where} GROUP BY channel, state",
+            params,
+        ).fetchall()
+        lanes = {}
+        for row in counts:
+            lane = row["channel"][len(prefix):] if prefix else row["channel"]
+            lanes.setdefault(lane, {"counts": {}})["counts"][row["state"]] = row["count"]
+
+        active_rows = self.db.execute(
+            f"SELECT {columns} FROM jobs WHERE {where} AND state='running' ORDER BY seq",
+            params,
+        ).fetchall()
+        for row in active_rows:
+            lane = row["channel"][len(prefix):] if prefix else row["channel"]
+            lanes.setdefault(lane, {"counts": {}}).setdefault("running", []).append(
+                self._snapshot_job({**dict(row), "lane": lane})
+            )
+
+        if only_lane is not None:
+            queue_sql = f"SELECT {columns} FROM jobs WHERE {where} AND state='queued' ORDER BY priority DESC, seq ASC LIMIT ? OFFSET ?"
+            queue_params = [*params, per_agent_limit, offset]
+        else:
+            queue_sql = f"SELECT {columns} FROM (SELECT {columns}, ROW_NUMBER() OVER (PARTITION BY channel ORDER BY priority DESC, seq ASC) AS lane_rank FROM jobs WHERE {where} AND state='queued') WHERE lane_rank<=? ORDER BY channel, priority DESC, seq ASC"
+            queue_params = [*params, per_agent_limit]
+        queued = self.db.execute(queue_sql, queue_params).fetchall()
+        seen = {}
+        for row in queued:
+            lane = row["channel"][len(prefix):] if prefix else row["channel"]
+            n = seen.get(lane, 0)
+            seen[lane] = n + 1
+            target = lanes.setdefault(lane, {"counts": {}})
+            target.setdefault("queued", [])
+            if only_lane is not None or n < per_agent_limit:
+                target["queued"].append(self._snapshot_job({**dict(row), "lane": lane}))
+        for lane, data in lanes.items():
+            data.setdefault("running", [])
+            data.setdefault("queued", [])
+            data["queued_total"] = data["counts"].get("queued", 0)
+            data["queued_offset"] = offset if only_lane == lane else 0
+            data["queued_truncated"] = data["queued_total"] > (offset + len(data["queued"]) if only_lane == lane else len(data["queued"]))
+
+        recent_rows = self.db.execute(
+            f"SELECT {columns} FROM jobs WHERE {where} AND state IN ('done','failed','interrupted','cancelled','steered') ORDER BY seq DESC LIMIT ?",
+            (*params, recent_limit),
+        ).fetchall()
+        recent = []
+        for row in recent_rows:
+            lane = row["channel"][len(prefix):] if prefix else row["channel"]
+            recent.append(self._snapshot_job({**dict(row), "lane": lane}))
+        cursor = self.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+        totals = {}
+        for data in lanes.values():
+            for state, count in data["counts"].items():
+                totals[state] = totals.get(state, 0) + count
+        return {
+            "generated_at": time.time(), "cursor": cursor,
+            "totals": totals, "agents": lanes, "recent": recent,
+        }
+
     def events(self, after, limit, channel=None):
         sql = "SELECT * FROM events WHERE seq>?"
         args = [after]

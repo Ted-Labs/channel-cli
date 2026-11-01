@@ -58,6 +58,9 @@ def render(value, command, verbose=False):
         if not value:
             return '새 이벤트가 없습니다.'
         return '\n\n'.join(f"#{e['seq']} · {STATES.get(e['type'], e['type'])}\n" + render(e['payload'], 'result') for e in value)
+    if command == 'snapshot':
+        totals = value.get('totals', {})
+        return f"큐 snapshot · 실행 {totals.get('running', 0)} · 대기 {totals.get('queued', 0)} · cursor {value.get('cursor', 0)}"
     job = value
     label = {'send': '접수', 'retry': '재접수', 'cancel': '취소', 'interrupt': '중지 요청', 'steer': '지금 바로'}.get(command, STATES[job['state']])
     head = f"{label} · @{job['agent']} · {plain(job['channel'])}/{plain(job['room'])} · {job['id'][:8]}"

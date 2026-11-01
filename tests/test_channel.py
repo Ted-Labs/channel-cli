@@ -151,6 +151,23 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual([self.store.claim()['id'] for _ in range(4)],
                          [high_first['id'], high_second['id'], default['id'], low['id']])
 
+    def test_snapshot_groups_priority_order_and_bounds_pages(self):
+        channel = 'atrium-web:pixie'
+        low = self.store.enqueue(channel, 'dev', 'codex-body', 'low request', 'private prompt', message_id='m1', priority=80)
+        tied = self.store.enqueue(channel, 'dev', 'codex-body', 'next tied request', 'private prompt', message_id='m2', priority=80)
+        high = self.store.enqueue(channel, 'dev', 'codex-body', 'highest request', 'private prompt', message_id='m3', priority=95)
+        self.store.enqueue('atrium-web:cora', 'dev', 'claude-body', 'other lane', 'private prompt', priority=99)
+        first_page = self.store.snapshot('atrium-web:', per_agent_limit=2, recent_limit=0)
+        lane = first_page['agents']['pixie']
+        self.assertEqual([job['id'] for job in lane['queued']], [high['id'], low['id']])
+        self.assertEqual(lane['queued_total'], 3)
+        self.assertTrue(lane['queued_truncated'])
+        self.assertNotIn('prompt', lane['queued'][0])
+        second_page = self.store.snapshot('atrium-web:', per_agent_limit=2, recent_limit=0,
+                                          only_lane='pixie', offset=2)
+        self.assertEqual([job['id'] for job in second_page['agents']['pixie']['queued']], [tied['id']])
+        self.assertFalse(second_page['agents']['pixie']['queued_truncated'])
+
     def test_priority_validation_and_cli_delivery(self):
         for priority in (-1, 101, True, 50.5, '50'):
             with self.subTest(priority=priority), self.assertRaises(ValueError):
