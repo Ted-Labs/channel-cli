@@ -96,3 +96,44 @@ class GeminiFastReplyTests(unittest.TestCase):
                 result = agy_body.run('request', timeout=1, session='gemini')
             self.assertEqual(result.text, 'fast answer')
             self.assertIn('[Atrium request ', buffer['prompt'])
+
+    def test_background_command_keeps_intermediate_planner_response_from_completing_turn(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'GEMINI_HOME': home}):
+            transcript = Path(home) / '.gemini/antigravity-cli/brain/own/.system_generated/logs/transcript.jsonl'
+            transcript.parent.mkdir(parents=True)
+            buffer = {}
+            sleep_calls = {'count': 0}
+
+            def write_transcript(command_status, final_answer=None):
+                rows = [
+                    {'type': 'USER_INPUT', 'content': buffer['prompt']},
+                    {'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': '테스트 실행 결과를 기다립니다.'},
+                    {'type': 'RUN_COMMAND', 'status': command_status, 'step_index': 2,
+                     'content': ('Tool is running as a background task with task id task-2'
+                                 if command_status == 'RUNNING' else 'Background task completed')},
+                ]
+                if final_answer:
+                    rows.append({'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': final_answer})
+                transcript.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows))
+
+            def tmux(args, **kwargs):
+                if 'load-buffer' in args:
+                    buffer['prompt'] = kwargs['input'].decode()
+                if 'send-keys' in args and args[-1] == 'Enter':
+                    write_transcript('RUNNING')
+                return Mock(returncode=0)
+
+            def sleep(_seconds):
+                sleep_calls['count'] += 1
+                # The initial 0.4s settle and 20 start checks happen before
+                # monitoring. Complete the background task on the next poll.
+                if sleep_calls['count'] == 22:
+                    write_transcript('DONE', '테스트가 통과했고 수정 사항을 정리했습니다.')
+
+            with patch.object(agy_body, 'is_online', return_value=True), \
+                 patch.object(agy_body, 'is_busy', return_value=False), \
+                 patch('subprocess.run', side_effect=tmux), \
+                 patch.object(agy_body.time, 'sleep', side_effect=sleep):
+                result = agy_body.run('request', timeout=5, session='gemini')
+
+            self.assertEqual(result.text, '테스트가 통과했고 수정 사항을 정리했습니다.')

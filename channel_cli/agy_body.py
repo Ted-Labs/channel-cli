@@ -62,6 +62,66 @@ def extract_latest_answer(transcript_path, min_line=0):
     return ""
 
 
+def transcript_has_unfinished_work(transcript_path, min_line=0):
+    """Whether this request has tool work that is still running or unanswered.
+
+    Antigravity can emit a planner response before dispatching a command. That
+    response is useful as progress, but it is not the turn result when a later
+    tool step is still running or has not yet been followed by another planner
+    response.
+    """
+    if not transcript_path or not transcript_path.exists():
+        return False
+    try:
+        lines = transcript_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+
+    latest_answer_line = -1
+    latest_work_line = -1
+    active_tasks = set()
+
+    for index, line in enumerate(lines[min_line:], start=min_line):
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+
+        row_type = str(row.get("type", "")).upper()
+        if row.get("source") == "MODEL" and row_type == "PLANNER_RESPONSE":
+            content = row.get("content")
+            if isinstance(content, str) and content.strip():
+                latest_answer_line = index
+            continue
+
+        if row_type in {"", "USER_INPUT", "SYSTEM", "SYSTEM_MESSAGE"}:
+            continue
+
+        # Transcript tool steps (notably RUN_COMMAND) may be appended more
+        # than once as their status changes. Prefer stable task/step ids so a
+        # later terminal update clears the corresponding running entry.
+        status = str(row.get("status", row.get("state", ""))).upper()
+        content = row.get("content")
+        text_content = content if isinstance(content, str) else ""
+        task_match = re.search(r"\b(task-[A-Za-z0-9._/-]+)", text_content, re.I)
+        task_id = (row.get("task_id") or row.get("tool_call_id") or
+                   (task_match.group(1) if task_match else None) or row.get("step_index"))
+        task_key = ("task", str(task_id)) if task_id is not None else (row_type, "")
+        background_task = isinstance(content, str) and re.search(
+            r"running as a background task|background task with task id", content, re.I
+        )
+
+        latest_work_line = index
+        if status in {"RUNNING", "PENDING", "IN_PROGRESS"} or background_task:
+            active_tasks.add(task_key)
+        elif status in {"DONE", "SUCCESS", "ERROR", "FAILED", "CANCELLED", "CANCELED"}:
+            active_tasks.discard(task_key)
+
+    # A response before a tool step is progress. Wait for a newer planner
+    # response after that step, even when the tool itself has completed.
+    return bool(active_tasks) or latest_work_line > latest_answer_line
+
+
 def request_transcript(marker):
     """Find the transcript containing this injection, never a merely recent session."""
     home = Path(os.environ.get("GEMINI_HOME") or Path.home())
