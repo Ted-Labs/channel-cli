@@ -19,6 +19,22 @@ def default_session():
     return os.environ.get("CHANNEL_AGY_SESSION", "gemini")
 
 
+def session_for_channel(channel):
+    if not channel or not str(channel).startswith("atrium-web:"):
+        return None
+    persona = str(channel).split(":", 1)[1].strip()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", persona):
+        return None
+    if persona == "cora":
+        return os.environ.get("CHANNEL_CORA_SESSION", "cora")
+    if persona == "pixie":
+        return os.environ.get("AGENT_PIXIE_TMUX", "pixie")
+    if persona == "gemini":
+        return os.environ.get("AGENT_GEMINI_TMUX") or default_session()
+    env_key = f"AGENT_{persona.upper().replace('-', '_')}_TMUX"
+    return os.environ.get(env_key, persona)
+
+
 def tmux_bin():
     return shutil.which("tmux") or "tmux"
 
@@ -28,6 +44,30 @@ def is_online(session=None):
     proc = subprocess.run([tmux_bin(), "has-session", "-t", session],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return proc.returncode == 0
+
+
+def is_agy_session(session):
+    if not session or not is_online(session):
+        return False
+    proc = subprocess.run(
+        [tmux_bin(), "list-panes", "-t", f"={session}", "-F", "#{pane_current_command} #{pane_start_command}"],
+        capture_output=True, text=True,
+    )
+    out = getattr(proc, "stdout", "")
+    if getattr(proc, "returncode", 1) == 0 and isinstance(out, str) and re.search(r"\bagy\b", out):
+        return True
+    return "Antigravity" in capture_pane(session, lines=30)
+
+
+def resolve_session(session=None, channel=None):
+    if not channel:
+        return session or default_session()
+    candidate = session_for_channel(channel)
+    if candidate and is_agy_session(candidate):
+        return candidate
+    if session and is_agy_session(session):
+        return session
+    return session or default_session()
 
 
 def capture_pane(session=None, lines=8):
@@ -224,8 +264,8 @@ def clear_session(session, on_session=None):
 
 
 def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
-        on_turn=None, on_part=None, should_interrupt=None):
-    session = session or default_session()
+        on_turn=None, on_part=None, should_interrupt=None, channel=None):
+    session = resolve_session(session, channel)
     if not is_online(session):
         raise ValueError(f"tmux session '{session}' is not online")
 

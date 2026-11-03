@@ -107,7 +107,27 @@ class Connection:
                 notes.append(message)
 
 
-def pick_thread(conn, notes):
+def persona_cwd(channel):
+    if not channel or not str(channel).startswith("atrium-web:"):
+        return None
+    persona = str(channel).split(":", 1)[1].strip()
+    if not persona:
+        return None
+    env_key = f"AGENT_{persona.upper().replace('-', '_')}_CWD"
+    if os.environ.get(env_key):
+        return os.environ[env_key]
+    home = Path.home()
+    if persona == "cora":
+        return str(home / "Corpus")
+    if persona == "pixie":
+        return str(home / "codex-jobs")
+    if persona == "gemini":
+        return str(home / "agy-jobs")
+    candidate = home / f"{persona}-jobs"
+    return str(candidate if candidate.is_dir() else (home / "Corpus"))
+
+
+def pick_thread(conn, notes, preferred_cwd=None):
     wanted = os.environ.get("CHANNEL_CODEX_THREAD")
     if wanted:
         return wanted
@@ -121,6 +141,12 @@ def pick_thread(conn, notes):
         want = os.path.realpath(cwd)
         live = sorted([r for r in live if r.get("cwd") and os.path.realpath(r["cwd"]) == want],
                       key=lambda r: r.get("updatedAt") or 0, reverse=True)[:1]
+    elif preferred_cwd:
+        want = os.path.realpath(preferred_cwd)
+        matched = sorted([r for r in live if r.get("cwd") and os.path.realpath(r["cwd"]) == want],
+                         key=lambda r: r.get("updatedAt") or 0, reverse=True)[:1]
+        if matched:
+            live = matched
     live = [r["id"] for r in live]
     if len(live) != 1:
         raise ValueError(f"expected one persisted Codex thread on the daemon, found {len(live)}; "
@@ -143,21 +169,22 @@ def wait_idle(conn, thread, deadline, notes, should_interrupt=None):
 
 
 def run(prompt, timeout, socket_path=None, session=None, fresh=False, on_session=None,
-        on_turn=None, on_part=None, should_interrupt=None):
+        on_turn=None, on_part=None, should_interrupt=None, channel=None):
     """Start a turn in the daemon's live thread and wait for it to finish."""
     from .adapters import Reply
     if should_interrupt and should_interrupt():
         raise Interrupted("stopped before starting a turn")
     deadline = time.monotonic() + timeout
+    preferred_cwd = persona_cwd(channel)
     conn = Connection(socket_path or default_socket(), timeout)
     notes = []
     try:
         conn.request("initialize", {"clientInfo": {"name": "channel-cli", "version": "0.1.0"}}, notes)
         conn.send({"jsonrpc": "2.0", "method": "initialized"})
         if fresh:
-            base_thread = session or pick_thread(conn, notes)
+            base_thread = session or pick_thread(conn, notes, preferred_cwd=preferred_cwd)
             base = conn.request("thread/read", {"threadId": base_thread}, notes).get("thread", {})
-            params = {"cwd": base.get("cwd") or os.environ.get("CHANNEL_CODEX_CWD") or os.getcwd()}
+            params = {"cwd": preferred_cwd or base.get("cwd") or os.environ.get("CHANNEL_CODEX_CWD") or os.getcwd()}
             for key in ("model", "reasoningEffort", "approvalPolicy", "sandbox"):
                 if base.get(key) is not None:
                     params[key] = base[key]
@@ -165,7 +192,8 @@ def run(prompt, timeout, socket_path=None, session=None, fresh=False, on_session
             if not thread:
                 raise ValueError("Codex app-server started a fresh thread without an ID")
         else:
-            thread = session or pick_thread(conn, notes)
+            thread = ( pick_thread(conn, notes, preferred_cwd=preferred_cwd)
+                       if (preferred_cwd and not session) else (session or pick_thread(conn, notes, preferred_cwd=preferred_cwd)) )
             try:
                 conn.request("thread/resume", {"threadId": thread}, notes)
             except ValueError as e:

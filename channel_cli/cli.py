@@ -170,7 +170,8 @@ def worker(store, args):
                                          j, native, consume_fresh=bool(j.get("fresh") and not j.get("fresh_started"))),
                                      fresh=bool(job.get("fresh") and not job.get("fresh_started")),
                                      on_part=lambda text, j=job["id"]: store.part(j, text),
-                                     should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
+                                     should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a),
+                                     channel=job["channel"])
                 while True:
                     outcome = store.finish_or_steer(job, reply.text, session=reply.session)
                     if "steer" not in outcome:
@@ -186,7 +187,8 @@ def worker(store, args):
                                              on_session=lambda native, j=job: store.set_session(j, native),
                                              fresh=False,
                                              on_part=lambda text, j=job["id"]: store.part(j, text),
-                                             should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a))
+                                             should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a),
+                                             channel=job["channel"])
                     except (adapters.Interrupted, subprocess.TimeoutExpired, OSError, ValueError) as exc:
                         store.fail_steer(followup_id, str(exc)[:600])
                         raise

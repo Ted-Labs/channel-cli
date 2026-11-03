@@ -56,3 +56,11 @@ class AgyBodyTests(unittest.TestCase):
         self.assertEqual(reply.session, 'gemini')
         self.assertEqual(steps[0], ('session', 'gemini'))
         self.assertEqual(steps[1][1][1], 'load-buffer')
+
+    def test_persona_channel_routes_to_its_own_agy_tmux_session(self):
+        with patch.object(agy_body, 'is_agy_session', side_effect=lambda s: s in {'cora', 'gemini'}):
+            self.assertEqual(agy_body.resolve_session('gemini', 'atrium-web:cora'), 'cora')
+            self.assertEqual(agy_body.resolve_session(None, 'atrium-web:cora'), 'cora')
+        with patch.object(agy_body, 'is_agy_session', side_effect=lambda s: s == 'gemini'):
+            self.assertEqual(agy_body.resolve_session('gemini', 'atrium-web:cora'), 'gemini')
+            self.assertEqual(agy_body.resolve_session(None, 'atrium-web:cora'), 'gemini')

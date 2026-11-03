@@ -139,7 +139,7 @@ def steer(agent, turn, text):
 
 
 def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_session=None, fresh=False,
-        on_part=None, should_interrupt=None):
+        on_part=None, should_interrupt=None, channel=None):
     if agent == "claude-body":
         if fresh:
             raise ValueError("fresh sessions are not supported for claude-body")
@@ -150,12 +150,14 @@ def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_session=Non
         from . import body
         return body.run(prompt, timeout, session=session, fresh=fresh, on_session=on_session,
                         on_turn=on_turn, on_part=on_part,
-                        **({"should_interrupt": should_interrupt} if should_interrupt else {}))
+                        **({"should_interrupt": should_interrupt} if should_interrupt else {}),
+                        **({"channel": channel} if channel else {}))
     if agent == "agy-body":
         from . import agy_body
         return agy_body.run(prompt, timeout, session=session, fresh=fresh, on_session=on_session,
                             on_turn=on_turn, on_part=on_part,
-                            **({"should_interrupt": should_interrupt} if should_interrupt else {}))
+                            **({"should_interrupt": should_interrupt} if should_interrupt else {}),
+                            **({"channel": channel} if channel else {}))
     executable = shutil.which(agent)
     if not executable:
         raise ValueError(f"agent executable not found: {agent}")
