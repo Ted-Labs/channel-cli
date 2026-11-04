@@ -153,7 +153,9 @@ def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_session=Non
                         **({"should_interrupt": should_interrupt} if should_interrupt else {}),
                         **({"channel": channel} if channel else {}))
     if agent == "agy-body":
+        import importlib
         from . import agy_body
+        importlib.reload(agy_body)
         return agy_body.run(prompt, timeout, session=session, fresh=fresh, on_session=on_session,
                             on_turn=on_turn, on_part=on_part,
                             **({"should_interrupt": should_interrupt} if should_interrupt else {}),
