@@ -82,6 +82,21 @@ def is_busy(session=None):
     return bool(re.search(r"esc to (interrupt|cancel)|Press up to edit queued|Working\.\.\.|Running command|Loading\.\.\.", pane, re.I))
 
 
+def get_full_content(full_path, line_index):
+    try:
+        with full_path.open("r", encoding="utf-8", errors="replace") as f:
+            for j, line in enumerate(f):
+                if j == line_index:
+                    row = json.loads(line)
+                    content = row.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+                    break
+    except Exception:
+        pass
+    return None
+
+
 def extract_latest_answer(transcript_path, min_line=0):
     if not transcript_path or not transcript_path.exists():
         return ""
@@ -95,6 +110,11 @@ def extract_latest_answer(transcript_path, min_line=0):
                 continue
             if row.get("source") == "MODEL" and row.get("type") == "PLANNER_RESPONSE":
                 content = row.get("content")
+                if "content" in (row.get("truncated_fields") or []) or (isinstance(content, str) and "<truncated" in content):
+                    full_path = transcript_path.with_name("transcript_full.jsonl")
+                    full_content = get_full_content(full_path, i)
+                    if full_content:
+                        return full_content
                 if isinstance(content, str) and content.strip():
                     return content.strip()
     except Exception:

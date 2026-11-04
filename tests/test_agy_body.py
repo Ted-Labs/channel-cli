@@ -64,3 +64,21 @@ class AgyBodyTests(unittest.TestCase):
         with patch.object(agy_body, 'is_agy_session', side_effect=lambda s: s == 'gemini'):
             self.assertEqual(agy_body.resolve_session('gemini', 'atrium-web:cora'), 'gemini')
             self.assertEqual(agy_body.resolve_session(None, 'atrium-web:cora'), 'gemini')
+
+    def test_extract_latest_answer_recovers_truncated_content_from_full_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / 'transcript.jsonl'
+            full_transcript = Path(tmp) / 'transcript_full.jsonl'
+            transcript.write_text(json.dumps({
+                'source': 'MODEL',
+                'type': 'PLANNER_RESPONSE',
+                'content': 'prefix <truncated 100 bytes> suffix',
+                'truncated_fields': ['content'],
+            }) + '\n')
+            full_transcript.write_text(json.dumps({
+                'source': 'MODEL',
+                'type': 'PLANNER_RESPONSE',
+                'content': 'prefix complete full body without truncation suffix',
+            }) + '\n')
+            answer = agy_body.extract_latest_answer(transcript, 0)
+            self.assertEqual(answer, 'prefix complete full body without truncation suffix')
