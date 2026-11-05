@@ -8,8 +8,9 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from .assignment import recommend
 
-COMMANDS = ('reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage')
+COMMANDS = ('reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage', 'assign')
 
 def add_arguments(p):
     p.add_argument("subject", nargs="?")
@@ -32,6 +33,7 @@ def add_arguments(p):
     p.add_argument("--board", help="deliver: 이어 붙일 칠판 주제 id(첫 deliver 가 돌려준 board)")
     p.add_argument("--title", help="deliver: 칠판 주제 제목(Ted 부탁 한 줄 요약). 첫 deliver 에만")
     p.add_argument("--fresh", "--new-session", action="store_true", dest="fresh", help="deliver: 본체에 새 대화(세션)로 시작")
+    p.add_argument("--reason", help="deliver: assign 추천 결과의 배정 이유를 칠판에 기록")
 
 
 def register(sub):
@@ -73,21 +75,42 @@ def run(a, p):
             token = ""
     base = os.environ.get("CORPUS_WEB_URL", "http://127.0.0.1:8790")
 
-    def request(path, method="GET", body=None, timeout=10):
+    def request(path, method="GET", body=None, timeout=10, allow_error=False):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(base+path, data=data, headers={"authorization":"Bearer "+token, "content-type":"application/json"}, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as res: return json.loads(res.read().decode())
         except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            if allow_error: return None
             print(f"atrium: {exc}", file=sys.stderr); raise SystemExit(1)
+
+    if a.action == "assign":
+        if not a.subject or not a.body or a.relay_thread or a.topic or a.text or a.put or a.goal or a.reason:
+            p.error("assign requires <역할> <난이도> and does not accept other options")
+        runtimes = request("/agents", timeout=10).get("runtimes")
+        cora_usage = request("/sys/usage", timeout=15, allow_error=True)
+        agent_usage = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
+        try:
+            result = recommend(a.subject, a.body, runtimes, cora_usage, agent_usage)
+        except ValueError as exc:
+            p.error(str(exc))
+        if a.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(f"배정 추천: {result['target']} · {result['preferenceRank']}지망 (priority {result['priority']})")
+            print(result["reason"])
+        raise SystemExit()
+
+    if a.reason is not None and a.action != "deliver":
+        p.error("--reason is only for deliver")
 
     if a.action == "usage":
         if a.subject or a.body or a.relay_thread or a.topic or a.text or a.put or a.goal:
             p.error("usage does not accept extra positional or text options")
-        cora = request("/sys/usage", timeout=15)
-        agents = request("/sys/usage/agents", timeout=15)
+        cora = request("/sys/usage", timeout=15, allow_error=True)
+        agents = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
         if a.json:
-            print(json.dumps({"cora": cora, **agents}, ensure_ascii=False, indent=2))
+            print(json.dumps({"cora": cora, **(agents if isinstance(agents, dict) else {})}, ensure_ascii=False, indent=2))
             raise SystemExit()
 
         KST = datetime.timezone(datetime.timedelta(hours=9))
@@ -200,6 +223,7 @@ def run(a, p):
             if a.board: body["board"] = a.board
             if a.title: body["title"] = a.title
             if a.fresh: body["fresh"] = True
+            if a.reason: body["assignmentReason"] = " ".join(a.reason.split())[:500]
         elif a.board or a.title or a.fresh: p.error("--board/--title/--fresh are only for deliver")
         print(json.dumps(request("/agent-action", "POST", body), ensure_ascii=False))
         raise SystemExit()

@@ -17,3 +17,6 @@ artrium-cli = "channel_cli.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["channel_cli*"]
+
+[tool.setuptools.package-data]
+channel_cli = ["assignment.json"]

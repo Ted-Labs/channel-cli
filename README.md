@@ -109,6 +109,12 @@ python3 -m unittest discover -s tests -v
 
 ## 세 본체의 공통 큐
 
+### 작업 배정 추천과 v2 아키텍처
+
+`atrium assign <역할> <난이도>`는 현재 본체 상태·대기열과 사용량을 조회해 `channel_cli/assignment.json`의 지망표와 v2 우선순위(쉬움 70, 보통 80, 어려움 85)에 따라 추천을 돌려준다. 역할은 `구현`, `이미지/UI 시안`, `검사/리뷰`, `조사`; 난이도는 `쉬움`, `보통`, `어려움`이다. 기계 판독 출력은 `atrium --json assign 조사 보통`으로 받는다. 추천 결과의 `target`을 `atrium deliver <target> ... --reason '<reason>'`에 사용하면 이유가 칠판에 남는다.
+
+아키텍처 v2 설계와 로드맵 정본은 `docs/channel-cli-architecture-v2.md`와 `docs/channel-cli-roadmap-v2.md`, Intake/Router 통합 근거는 `docs/adr-intake-router-integration.md`에 있다.
+
 `claude-body`(별칭 `cora-body`), `codex-body`, `agy-body`(별칭 `gemini-body`)는 실행 중인 본체에 요청하고 동일한 작업 완료 이벤트를 반환한다. Claude/Codex/agy를 새로 실행하는 기존 `claude/codex/agy`와 구분한다.
 
 `claude-body`는 Atrium 웹 서버의 `/body-runs`를 통해 기존 Cora MCP 브리지에 전달한다. `ATRIUM_TOKEN` 또는 notify-token 파일로 인증하며, `CORPUS_WEB_URL`을 사용한다. 브리지 ACK가 없으면 전달 성공으로 처리하지 않는다. 최종 답은 `atrium reply --agent cora --run-id <id> --text '답'`로 제출하며, 워커가 공통 이벤트로 웹에 게시한다. `--run-id`는 reply에만 사용할 수 있다.

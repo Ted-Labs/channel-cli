@@ -1,0 +1,21 @@
+{
+  "roles": {
+    "구현": {
+      "쉬움": ["gemini", "pixie", "cora"],
+      "보통": ["pixie", "gemini", "cora"],
+      "어려움": ["pixie", "cora"]
+    },
+    "이미지/UI 시안": ["gemini", "pixie"],
+    "검사/리뷰": ["cora", "pixie"],
+    "조사": ["gemini", "cora", "pixie"]
+  },
+  "thresholds": {
+    "default_remaining_percent": 15,
+    "hard_remaining_percent": 30
+  },
+  "priorities": {
+    "쉬움": 70,
+    "보통": 80,
+    "어려움": 85
+  }
+}

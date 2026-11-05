@@ -15,13 +15,30 @@ class WebTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.requests = []
+        cls.fail_cora_usage = False
 
         class Handler(BaseHTTPRequestHandler):
             def handle_request(self):
                 data = self.rfile.read(int(self.headers.get('Content-Length', 0)))
                 cls.requests.append((self.command, self.path, self.headers.get('Authorization'),
                                      json.loads(data) if data else None))
+                if self.path == '/sys/usage' and cls.fail_cora_usage:
+                    self.send_response(502)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'usage unavailable')
+                    return
                 response = {'ok': True}
+                if self.path == '/agents':
+                    response = {'runtimes': [
+                        {'id': 'cora', 'state': 'busy', 'queued': 0},
+                        {'id': 'pixie', 'state': 'idle', 'queued': 0},
+                        {'id': 'gemini', 'state': 'idle', 'queued': 0},
+                    ]}
+                if self.path == '/sys/usage':
+                    response = {'session': {'utilization': 10}, 'weekly': {'utilization': 20}}
+                if self.path == '/sys/usage/agents':
+                    response = {'pixie': [{'name': '5시간', 'used': 5}], 'gemini': [{'name': '5시간', 'used': 90}]}
                 if self.path == '/notify':
                     response = {'id': 'attachment', 'file': '/files/result.png'}
                 if self.path.endswith('/log?since=2'):
@@ -54,6 +71,7 @@ class WebTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name)
         self.requests.clear()
+        type(self).fail_cora_usage = False
         self.url = f'http://127.0.0.1:{self.server.server_port}'
         self.env = {**os.environ, 'HOME': str(self.home), 'CHANNEL_HOME': str(self.home / 'queue'),
                     'PYTHONPATH': str(ROOT), 'CORPUS_WEB_URL': self.url,
@@ -70,7 +88,7 @@ class WebTests(unittest.TestCase):
     def test_help_contains_queue_and_web_without_auth_or_database(self):
         self.env.pop('ATRIUM_TOKEN')
         result = self.cli('--help')
-        for command in ('send', 'worker', 'reply', 'share', 'usage'):
+        for command in ('send', 'worker', 'reply', 'share', 'usage', 'assign'):
             self.assertIn(command, result.stdout)
         self.assertFalse((self.home / 'queue').exists())
         self.assertEqual(self.requests, [])
@@ -100,6 +118,30 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.requests[-1][3], {'action': 'deliver', 'agent': 'cora',
                          'target': 'gemini', 'text': 'work', 'thread': 't12',
                          'board': 'b1', 'title': 'title', 'fresh': True})
+
+    def test_deliver_can_record_assignment_reason(self):
+        self.cli('deliver', 'pixie', 'work', '--agent', 'cora', '--reason', '1지망 픽시가 사용 가능')
+        self.assertEqual(self.requests[-1][3]['assignmentReason'], '1지망 픽시가 사용 가능')
+
+    def test_assign_skips_busy_and_low_quota_candidates(self):
+        result = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
+        self.assertEqual(result['target'], 'pixie')
+        self.assertEqual(result['preferenceRank'], 3)
+        self.assertEqual(result['priority'], 80)
+        self.assertEqual(result['tier'], 'body')
+        self.assertTrue(result['available'])
+        self.assertEqual(result['considered'][0]['agent'], 'gemini')
+        self.assertIn('Gemini', result['reason'])
+        self.assertEqual([row[1] for row in self.requests], ['/agents', '/sys/usage', '/sys/usage/agents'])
+
+    def test_assign_and_usage_tolerate_cora_usage_502(self):
+        type(self).fail_cora_usage = True
+        result = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
+        self.assertEqual(result['target'], 'pixie')
+        self.assertEqual(result['preferenceRank'], 3)
+        usage = json.loads(self.cli('--json', 'usage').stdout)
+        self.assertIsNone(usage['cora'])
+        self.assertEqual(usage['pixie'][0]['used'], 5)
 
     def test_share_checks_download_and_preserves_direct_room(self):
         image = self.home / 'result.png'
