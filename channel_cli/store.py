@@ -359,8 +359,32 @@ class Store:
     def _snapshot_job(row):
         # Keep this read model deliberately smaller than jobs/events: the web
         # canvas must not receive prompts, answers, cwd, or raw error output.
-        text = re.sub(r"\s+", " ", str(row["text"] or "")).strip()
-        title = text[:96] + ("…" if len(text) > 96 else "")
+        raw_text = str(row["text"] or "")
+        title = ""
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("[Atrium") or line.startswith("[atrium"):
+                continue
+            if line.startswith("[이 응답은") or line.startswith("[이 대화에서") or line.startswith("[응답 언어:"):
+                continue
+            if line.startswith("지금은 주인님(Ted)") or line.startswith("Ted와 직접") or line.startswith("코라가 전달한"):
+                continue
+            if line.startswith('{"chat_id"') or (line.startswith('{') and line.endswith('}') and '"chat_id"' in line):
+                continue
+            if line.startswith("[답장 대상]") or line.startswith("[첨부 경로]"):
+                continue
+            clean = re.sub(r"^(\[[^\]]*\]\s*)+", "", line).strip()
+            clean = re.sub(r"^@[\w-]+\s*", "", clean).strip()
+            if clean:
+                title = clean[:96] + ("…" if len(clean) > 96 else "")
+                break
+        if not title:
+            text = re.sub(r"\s+", " ", raw_text).strip()
+            clean = re.sub(r"^(\[[^\]]*\]\s*)+", "", text).strip()
+            clean = re.sub(r"^@[\w-]+\s*", "", clean).strip()
+            title = clean[:96] + ("…" if len(clean) > 96 else "")
         return {
             "id": row["id"], "lane": row["lane"], "agent": row["agent"],
             "channel": row["channel"], "room": row["room"],
