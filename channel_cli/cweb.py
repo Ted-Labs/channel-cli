@@ -69,7 +69,7 @@ def finish(store, token, state, error=None):
         store.db.execute('UPDATE cweb_restart SET state=?,updated=?,error=? WHERE id=1 AND token=? AND state IN (\'starting\',\'waiting\',\'restarting\')', (state, time.time(), error, token))
 
 
-def notify_restart(token, elapsed, timeout=15):
+def notify_restart(token, elapsed, timeout=60):
     try:
         auth_token = os.environ.get('ATRIUM_TOKEN') or os.environ.get('ARTRIUM_TOKEN')
         if not auth_token:
@@ -110,7 +110,7 @@ def notify_restart(token, elapsed, timeout=15):
         pass
 
 
-def supervise(home, token, timeout=600, notify_timeout=15):
+def supervise(home, token, timeout=600, notify_timeout=60):
     start_time = time.monotonic()
     store = Store(home)
     try:

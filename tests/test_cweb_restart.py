@@ -195,6 +195,14 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(cweb.status(self.store)['state'], 'done')
         self.assertEqual(urlopen_mock.call_count, 2)
 
+    def test_notify_timeout_defaults_to_60_seconds(self):
+        import inspect
+        notify_sig = inspect.signature(cweb.notify_restart)
+        self.assertEqual(notify_sig.parameters['timeout'].default, 60)
+
+        supervise_sig = inspect.signature(cweb.supervise)
+        self.assertEqual(supervise_sig.parameters['notify_timeout'].default, 60)
+
 
 if __name__ == '__main__':
     unittest.main()
