@@ -53,9 +53,13 @@ def _runtime_for(agent, runtimes):
     return None
 
 
-def recommend(role, difficulty, runtimes, cora_usage, agent_usage):
+def recommend(role, difficulty, runtimes, cora_usage, agent_usage, allowed=None):
     """Return the first eligible preference or the first preference as queue fallback."""
     ranked = preference(role, difficulty)
+    if allowed is not None:
+        ranked = [agent for agent in ranked if agent in allowed]
+        if not ranked:
+            raise ValueError("no eligible delivery target for role and difficulty")
     threshold = (POLICY["thresholds"]["hard_remaining_percent"]
                  if difficulty == "어려움" else POLICY["thresholds"]["default_remaining_percent"])
     priority = int(POLICY.get("priorities", {}).get(difficulty, 80))
@@ -74,7 +78,7 @@ def recommend(role, difficulty, runtimes, cora_usage, agent_usage):
         elif used > 100 - threshold:
             reasons.append(f"잔여 사용량 {100 - used:.0f}%로 기준 {threshold}% 미만")
         considered.append({"agent": agent, "rank": rank, "available": not reasons,
-                           "usedPercent": used, "reasons": reasons})
+                           "usedPercent": used, "queuedCount": int((runtime or {}).get("queued", 0) or 0), "reasons": reasons})
         if not reasons:
             skipped = "; ".join(f"{item['rank']}지망 {NAMES[item['agent']]}({', '.join(item['reasons'])})"
                                  for item in rejected)
@@ -92,5 +96,5 @@ def recommend(role, difficulty, runtimes, cora_usage, agent_usage):
     return {"role": role, "difficulty": difficulty, "target": first,
             "preferenceRank": 1, "priority": priority, "tier": "body",
             "available": False, "queued": True,
-            "reason": f"모든 지망이 현재 불가해 1지망 {NAMES[first]} 대기열로 보냄 ({details})",
+            "reason": f"모든 지망이 현재 불가해 1지망 {NAMES[first]} 대기열로 보냄 (기존 대기 {considered[0]['queuedCount']}건, priority {priority}; {details})",
             "considered": considered}

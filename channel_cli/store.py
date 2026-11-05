@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
  message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
  fresh INTEGER NOT NULL DEFAULT 0, fresh_started INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'queued', priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100),
+ tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker')), assignment_reason TEXT,
  answer TEXT, error TEXT,
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
@@ -70,6 +71,11 @@ class Store:
                         self.db.execute("ALTER TABLE jobs ADD COLUMN fresh_started INTEGER NOT NULL DEFAULT 0")
                     if "priority" not in columns:
                         self.db.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100)")
+                    if "tier" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker'))")
+                        self.db.execute("UPDATE jobs SET tier='worker' WHERE agent NOT IN ('codex-body', 'agy-body', 'claude-body')")
+                    if "assignment_reason" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN assignment_reason TEXT")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_queue_priority ON jobs(state, priority DESC, seq ASC)")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_agent_queue_priority ON jobs(state, agent, priority DESC, seq ASC)")
                     self.db.commit()
@@ -109,9 +115,12 @@ class Store:
         self.db.execute("INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)",
                         (job_id, kind, time.time(), json.dumps(job, ensure_ascii=False)))
 
-    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90):
+    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90, tier=None, assignment_reason=None):
         if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
             raise ValueError("priority must be an integer from 0 to 100")
+        tier = tier or ("body" if agent in ("codex-body", "agy-body", "claude-body") else "worker")
+        if tier not in ("body", "worker"):
+            raise ValueError("invalid tier")
         with self.db:
             if fresh and agent not in ("codex-body", "agy-body"):
                 raise ValueError("fresh sessions are supported for codex-body and agy-body only")
@@ -122,7 +131,7 @@ class Store:
                                            (channel, room, message_id)).fetchone()
                 if existing:
                     if (existing["text"] != text or existing["agent"] != agent or
-                            existing["fresh"] != int(fresh) or existing["priority"] != priority):
+                            existing["fresh"] != int(fresh) or existing["priority"] != priority or existing["tier"] != tier or existing["assignment_reason"] != assignment_reason):
                         raise ValueError("message-id already used with different content, agent, fresh flag, or priority")
                     return dict(existing)
             bound = self.db.execute("SELECT cwd FROM rooms WHERE channel=? AND room=?", (channel, room)).fetchone()
@@ -141,9 +150,9 @@ class Store:
                 target = str(workspace)
             self.db.execute("INSERT OR IGNORE INTO rooms VALUES(?,?,?)", (channel, room, target))
             job_id = uuid.uuid4().hex
-            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,created)
-                            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, time.time()))
+            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,tier,assignment_reason,created)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, tier, assignment_reason, time.time()))
             self.event(job_id, "queued")
         return self.get(job_id)
 
@@ -356,7 +365,7 @@ class Store:
             "id": row["id"], "lane": row["lane"], "agent": row["agent"],
             "channel": row["channel"], "room": row["room"],
             "message_id": row["message_id"], "state": row["state"],
-            "priority": row["priority"], "seq": row["seq"],
+            "priority": row["priority"], "tier": row["tier"], "assignment_reason": row["assignment_reason"], "seq": row["seq"],
             "created": row["created"], "started": row["started"],
             "finished": row["finished"], "attempts": row["attempts"],
             "title": title or "웹 채팅 요청",
@@ -364,7 +373,7 @@ class Store:
 
     def snapshot(self, channel_prefix="", per_agent_limit=50, recent_limit=12, only_lane=None, offset=0):
         """Return bounded, prompt-free queue data grouped by channel lane."""
-        columns = "id,channel,room,agent,message_id,state,priority,seq,created,started,finished,attempts,text"
+        columns = "id,channel,room,agent,message_id,state,priority,tier,assignment_reason,seq,created,started,finished,attempts,text"
         prefix = str(channel_prefix)
         where = "channel LIKE ? ESCAPE '\\'" if prefix else "1=1"
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

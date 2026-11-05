@@ -123,6 +123,13 @@ class WebTests(unittest.TestCase):
         self.cli('deliver', 'pixie', 'work', '--agent', 'cora', '--reason', '1지망 픽시가 사용 가능')
         self.assertEqual(self.requests[-1][3]['assignmentReason'], '1지망 픽시가 사용 가능')
 
+    def test_deliver_auto_assignment_propagates_priority(self):
+        self.cli("deliver", "work", "--agent", "cora", "--role", "구현", "--difficulty", "보통")
+        body = self.requests[-1][3]
+        self.assertEqual((body["target"], body["priority"], body["tier"]), ("pixie", 80, "body"))
+        self.assertFalse(body["assignmentQueued"])
+        self.assertIn("픽시", body["assignmentReason"])
+
     def test_assign_skips_busy_and_low_quota_candidates(self):
         result = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
         self.assertEqual(result['target'], 'pixie')

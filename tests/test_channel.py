@@ -104,12 +104,12 @@ class ChannelTests(unittest.TestCase):
         return self.store.enqueue(channel, room, agent, text, text, message_id=message_id, priority=priority)
 
     def test_route(self):
-        self.assertEqual(route('@Claude hello'), RoutingDecision('claude', 'hello', 90))
-        self.assertEqual(route('hello a@codex.com', default='claude'), RoutingDecision('claude', 'hello a@codex.com', 90))
-        self.assertEqual(route('@codex hi @codex'), RoutingDecision('codex', 'hi', 90))
-        self.assertEqual(route('@gemini hello'), RoutingDecision('agy', 'hello', 90))
-        self.assertEqual(route('@agy hi @gemini'), RoutingDecision('agy', 'hi', 90))
-        self.assertEqual(route('@agy hello', priority=42), RoutingDecision('agy', 'hello', 42))
+        self.assertEqual(route('@Claude hello'), RoutingDecision('claude', 'hello', 90, 'worker'))
+        self.assertEqual(route('hello a@codex.com', default='claude'), RoutingDecision('claude', 'hello a@codex.com', 90, 'worker'))
+        self.assertEqual(route('@codex hi @codex'), RoutingDecision('codex', 'hi', 90, 'worker'))
+        self.assertEqual(route('@gemini hello'), RoutingDecision('agy', 'hello', 90, 'worker'))
+        self.assertEqual(route('@agy hi @gemini'), RoutingDecision('agy', 'hi', 90, 'worker'))
+        self.assertEqual(route('@agy hello', priority=42), RoutingDecision('agy', 'hello', 42, 'worker'))
         for text in ('@unknown hi', '@claude @codex hi', '@claude', 'hi', '@claudex hi'):
             with self.assertRaises(ValueError, msg=text):
                 route(text)

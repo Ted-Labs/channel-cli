@@ -23,6 +23,7 @@ class RoutingDecision(NamedTuple):
     agent: str
     prompt: str
     priority: int
+    tier: str = "body"
 
 
 def route(text, explicit=None, default=None, priority=90):
@@ -46,7 +47,7 @@ def route(text, explicit=None, default=None, priority=90):
     prompt = MENTION.sub("", text).strip()
     if not prompt:
         raise ValueError("message must contain text beyond the mention")
-    return RoutingDecision(agent, prompt, priority)
+    return RoutingDecision(agent, prompt, priority, "body" if agent in adapters.BODIES else "worker")
 
 
 def emit(value, args):
@@ -98,6 +99,7 @@ def parser():
     send.add_argument("--agent", choices=(*adapters.AGENTS, *adapters.ALIASES))
     send.add_argument('--literal', action='store_true', help='--agent를 사용하며 본문의 @표식을 해석하지 않음')
     send.add_argument("--priority", type=priority_value, default=90, help="queue priority from 0 to 100 (default: 90)")
+    send.add_argument("--assignment-reason", help="assignment rationale")
     send.add_argument("--cwd", help="bind the room to an existing directory on its first message")
     send.add_argument("--message-id", help="channel delivery key for idempotent enqueue")
     send.add_argument("--fresh", action="store_true", help="start a new live-body conversation before this request")
@@ -249,13 +251,13 @@ def main():
             if args.literal:
                 if not args.agent:
                     raise ValueError('--literal requires --agent')
-                decision = RoutingDecision(adapters.ALIASES.get(args.agent, args.agent), text.strip(), args.priority)
+                decision = RoutingDecision(adapters.ALIASES.get(args.agent, args.agent), text.strip(), args.priority, "body" if adapters.ALIASES.get(args.agent, args.agent) in adapters.BODIES else "worker")
             else:
                 decision = route(text, args.agent, os.environ.get("CHANNEL_DEFAULT_AGENT"), args.priority)
             if args.fresh and decision.agent not in adapters.BODIES[:2]:
                 raise ValueError("--fresh requires codex-body or agy-body")
             emit(store.enqueue(args.channel, args.room, decision.agent, text, decision.prompt, args.cwd,
-                               args.message_id, fresh=args.fresh, priority=decision.priority), args)
+                               args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason), args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt

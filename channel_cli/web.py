@@ -33,6 +33,8 @@ def add_arguments(p):
     p.add_argument("--board", help="deliver: 이어 붙일 칠판 주제 id(첫 deliver 가 돌려준 board)")
     p.add_argument("--title", help="deliver: 칠판 주제 제목(Ted 부탁 한 줄 요약). 첫 deliver 에만")
     p.add_argument("--fresh", "--new-session", action="store_true", dest="fresh", help="deliver: 본체에 새 대화(세션)로 시작")
+    p.add_argument("--role", help="deliver assignment role")
+    p.add_argument("--difficulty", help="deliver assignment difficulty")
     p.add_argument("--reason", help="deliver: assign 추천 결과의 배정 이유를 칠판에 기록")
 
 
@@ -101,6 +103,8 @@ def run(a, p):
             print(result["reason"])
         raise SystemExit()
 
+    if (a.role or a.difficulty) and a.action != "deliver":
+        p.error("--role and --difficulty are only for deliver")
     if a.reason is not None and a.action != "deliver":
         p.error("--reason is only for deliver")
 
@@ -214,7 +218,17 @@ def run(a, p):
 
     if not a.agent: p.error("--agent or CORPUS_PERSONA is required")
     if a.action in ("relay", "deliver"):
-        if not a.subject or not a.body: p.error(f"{a.action} requires <target> <text>")
+        auto = a.action == "deliver" and (a.role or a.difficulty)
+        if auto and (not a.role or not a.difficulty): p.error("--role and --difficulty are both required")
+        if auto and a.body is None:
+            a.body, a.subject = a.subject, None
+        if not a.body or (not auto and not a.subject): p.error(f"{a.action} requires <target> <text>, or deliver <text> --role ROLE --difficulty DIFFICULTY")
+        if auto:
+            if a.subject and a.subject != "auto": p.error("automatic assignment cannot specify a target")
+            try:
+                decision = recommend(a.role, a.difficulty, request("/agents").get("runtimes"), request("/sys/usage", timeout=15, allow_error=True), request("/sys/usage/agents", timeout=15, allow_error=True) or {}, allowed={"pixie", "gemini"})
+            except ValueError as exc: p.error(str(exc))
+            a.subject = decision["target"]
         if a.text is not None: p.error(f"{a.action} text is positional")
         # deliver 는 코라만 쓴다(서버가 agent=cora 만 받는다): 픽시·Gemini 본체에 "[코라 중계] …" 로 넣는다
         body = {"action": a.action, "agent": a.agent, "target": a.subject, "text": a.body}
@@ -223,7 +237,9 @@ def run(a, p):
             if a.board: body["board"] = a.board
             if a.title: body["title"] = a.title
             if a.fresh: body["fresh"] = True
-            if a.reason: body["assignmentReason"] = " ".join(a.reason.split())[:500]
+            if auto:
+                body.update(priority=decision["priority"], tier=decision["tier"], assignmentReason=decision["reason"], assignmentQueued=decision["queued"])
+            elif a.reason: body["assignmentReason"] = " ".join(a.reason.split())[:500]
         elif a.board or a.title or a.fresh: p.error("--board/--title/--fresh are only for deliver")
         print(json.dumps(request("/agent-action", "POST", body), ensure_ascii=False))
         raise SystemExit()
