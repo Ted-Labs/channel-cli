@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from . import adapters, body, web
+from . import adapters, body, web, cweb
 from .store import Store
 from .output import emit as display
 
@@ -127,6 +127,8 @@ def parser():
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--limit", type=bounded, default=100)
     events.add_argument("--channel")
+    cw = sub.add_parser('cweb', help='cweb maintenance')
+    cw.add_argument('action', choices=('restart', 'status', 'cancel', 'recover'))
     web.register(sub)
     for command_parser in sub.choices.values():
         command_parser.add_argument('--json', action='store_true', default=argparse.SUPPRESS,
@@ -152,6 +154,9 @@ def worker(store, args):
         while True:
             job = store.claim(worker_agent)
             if job is None:
+                if store.restart_paused():
+                    time.sleep(args.poll)
+                    continue
                 if args.once or args.drain:
                     if args.once and not args.json:
                         print('대기 중인 작업이 없습니다.', flush=True)
@@ -230,7 +235,14 @@ def main():
             emit(adapters.discover(), args)
             return
         store = Store(args.home)
-        if args.command == "send":
+        if args.command == 'cweb':
+            result = cweb.command(store, args.action)
+            if args.json:
+                import json
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(result)
+        elif args.command == "send":
             text = sys.stdin.read() if args.text == "-" else args.text
             if not text.strip() or not args.channel.strip() or not args.room.strip():
                 raise ValueError("message, channel and room must not be empty")

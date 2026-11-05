@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
  type TEXT NOT NULL, created REAL NOT NULL, payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cweb_restart (
+ id INTEGER PRIMARY KEY CHECK(id=1), token TEXT NOT NULL, state TEXT NOT NULL,
+ requested REAL NOT NULL, updated REAL NOT NULL, error TEXT
+);
 """
 
 
@@ -82,6 +86,9 @@ class Store:
 
     def close(self):
         self.db.close()
+
+    def restart_paused(self):
+        return bool(self.db.execute("SELECT 1 FROM cweb_restart WHERE id=1 AND state IN ('starting','waiting','restarting')").fetchone())
 
     def get(self, job_id):
         row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -143,6 +150,8 @@ class Store:
     def claim(self, agent=None):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute("SELECT 1 FROM cweb_restart WHERE id=1 AND state IN ('starting','waiting','restarting')").fetchone():
+                return None
             if agent:
                 row = self.db.execute("SELECT id FROM jobs WHERE state='queued' AND agent=? ORDER BY priority DESC, seq ASC LIMIT 1",
                                       (agent,)).fetchone()
