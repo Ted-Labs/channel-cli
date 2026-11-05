@@ -1,8 +1,12 @@
 """Detached cweb maintenance with a transactional queue drain."""
+import json
+import os
 import shlex
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -65,7 +69,49 @@ def finish(store, token, state, error=None):
         store.db.execute('UPDATE cweb_restart SET state=?,updated=?,error=? WHERE id=1 AND token=? AND state IN (\'starting\',\'waiting\',\'restarting\')', (state, time.time(), error, token))
 
 
-def supervise(home, token, timeout=600):
+def notify_restart(token, elapsed, timeout=15):
+    try:
+        auth_token = os.environ.get('ATRIUM_TOKEN') or os.environ.get('ARTRIUM_TOKEN')
+        if not auth_token:
+            try:
+                auth_token = (Path.home() / '.claude/channels/corpus-web/notify-token').read_text().strip()
+            except OSError:
+                auth_token = None
+        if not auth_token:
+            return
+
+        base = os.environ.get('CORPUS_WEB_URL', 'http://127.0.0.1:8790').rstrip('/')
+        url = f"{base}/notify"
+        payload = {
+            "topic": "dev",
+            "from": "system",
+            "text": f"✅ cweb 안전 재시작이 완료되었습니다. ({elapsed:.1f}초 소요)",
+            "key": f"cweb-restart:{token[:12]}",
+        }
+        data = json.dumps(payload).encode('utf-8')
+        headers = {
+            'Authorization': f'Bearer {auth_token}',
+            'Content-Type': 'application/json',
+        }
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                timeout_sec = min(5, max(1, deadline - time.monotonic()))
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    status_code = getattr(resp, 'status', getattr(resp, 'code', 200))
+                    if 200 <= status_code < 300:
+                        return
+            except Exception:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
+    except Exception:
+        pass
+
+
+def supervise(home, token, timeout=600, notify_timeout=15):
+    start_time = time.monotonic()
     store = Store(home)
     try:
         with store.db:
@@ -94,6 +140,11 @@ def supervise(home, token, timeout=600):
         subprocess.run(['sh', str(directory / 'start.sh')], check=True, timeout=30)
         subprocess.run(['tmux', 'has-session', '-t', '=cweb'], check=True, capture_output=True, timeout=10)
         finish(store, token, 'done')
+        elapsed = time.monotonic() - start_time
+        try:
+            notify_restart(token, elapsed, timeout=notify_timeout)
+        except Exception:
+            pass
     except Exception as exc:
         finish(store, token, 'failed', str(exc)[:500])
     finally:

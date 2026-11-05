@@ -1,7 +1,10 @@
+import json
+import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from channel_cli import cweb
 from channel_cli.store import Store
@@ -101,6 +104,96 @@ class RestartTest(unittest.TestCase):
         cweb.supervise(self.store.home, request['token'], timeout=1)
         self.assertEqual(cweb.status(self.store)['state'], 'failed')
         self.assertIn('failed to kill existing cweb', cweb.status(self.store)['error'])
+
+    @patch('channel_cli.cweb.urllib.request.urlopen')
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_supervise_sends_system_notification_on_completion(self, run, urlopen_mock):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
+        token_dir = self.home / '.claude/channels/corpus-web'
+        token_dir.mkdir(parents=True, exist_ok=True)
+        (token_dir / 'notify-token').write_text('test-token-123\n')
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        urlopen_mock.return_value.__enter__.return_value = fake_resp
+
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1)
+
+        self.assertEqual(cweb.status(self.store)['state'], 'done')
+        self.assertTrue(urlopen_mock.called)
+        req = urlopen_mock.call_args[0][0]
+        self.assertEqual(req.get_full_url(), 'http://127.0.0.1:8790/notify')
+        self.assertEqual(req.get_method(), 'POST')
+        self.assertEqual(req.get_header('Authorization'), 'Bearer test-token-123')
+        payload = json.loads(req.data.decode('utf-8'))
+        self.assertEqual(payload['topic'], 'dev')
+        self.assertEqual(payload['from'], 'system')
+        self.assertEqual(payload['key'], f"cweb-restart:{request['token'][:12]}")
+        self.assertTrue(payload['text'].startswith('✅ cweb 안전 재시작이 완료되었습니다. ('))
+        self.assertTrue(payload['text'].endswith('초 소요)'))
+
+    @patch.dict(os.environ, {'ATRIUM_TOKEN': 'env-token-xyz'})
+    @patch('channel_cli.cweb.urllib.request.urlopen')
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_supervise_uses_env_token(self, run, urlopen_mock):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        urlopen_mock.return_value.__enter__.return_value = fake_resp
+
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1)
+
+        self.assertEqual(cweb.status(self.store)['state'], 'done')
+        self.assertTrue(urlopen_mock.called)
+        req = urlopen_mock.call_args[0][0]
+        self.assertEqual(req.get_header('Authorization'), 'Bearer env-token-xyz')
+
+    @patch('channel_cli.cweb.urllib.request.urlopen')
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_notification_failure_does_not_fail_restart(self, run, urlopen_mock):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
+        token_dir = self.home / '.claude/channels/corpus-web'
+        token_dir.mkdir(parents=True, exist_ok=True)
+        (token_dir / 'notify-token').write_text('test-token-123\n')
+
+        urlopen_mock.side_effect = urllib.error.URLError('server unreachable')
+
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1, notify_timeout=0.1)
+
+        status_info = cweb.status(self.store)
+        self.assertEqual(status_info['state'], 'done')
+        self.assertIsNone(status_info['error'])
+
+    @patch('channel_cli.cweb.urllib.request.urlopen')
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_notification_retries_and_succeeds(self, run, urlopen_mock):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
+        token_dir = self.home / '.claude/channels/corpus-web'
+        token_dir.mkdir(parents=True, exist_ok=True)
+        (token_dir / 'notify-token').write_text('test-token-123\n')
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        fake_resp.__enter__.return_value = fake_resp
+
+        urlopen_mock.side_effect = [
+            urllib.error.URLError('starting up...'),
+            fake_resp,
+        ]
+
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1, notify_timeout=2)
+
+        self.assertEqual(cweb.status(self.store)['state'], 'done')
+        self.assertEqual(urlopen_mock.call_count, 2)
 
 
 if __name__ == '__main__':
