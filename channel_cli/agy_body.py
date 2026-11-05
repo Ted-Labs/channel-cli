@@ -444,14 +444,21 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
         on_turn(session, f"turn-{int(time.time())}")
 
     stop_at = None
+    unmatched_stop_at = None
     idle_hits = 0
     def stopping():
-        nonlocal stop_at, idle_hits
+        nonlocal stop_at, unmatched_stop_at, idle_hits
         if not should_interrupt or not should_interrupt():
             return False
         # A unique marker proves the request belongs to this worker before Escape.
         if stop_at is None:
             if not request_transcript(marker):
+                if not is_busy(session):
+                    raise Interrupted("stopped while request delivery was unconfirmed")
+                if unmatched_stop_at is None:
+                    unmatched_stop_at = time.monotonic()
+                elif time.monotonic() - unmatched_stop_at >= 15:
+                    raise ValueError("cannot confirm request ownership; session was not interrupted")
                 return True
             interrupt(session)
             stop_at = time.monotonic()
@@ -477,6 +484,7 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
             break
 
     last_answer = ""
+    unconfirmed_idle_at = None
     # Monitor until completion
     while True:
         if time.monotonic() > deadline:
@@ -488,6 +496,14 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
         match = request_transcript(marker)
         if match:
             transcript, min_line = match
+            unconfirmed_idle_at = None
+        elif not is_busy(session):
+            if unconfirmed_idle_at is None:
+                unconfirmed_idle_at = time.monotonic()
+            elif time.monotonic() - unconfirmed_idle_at >= 30:
+                raise ValueError("Gemini request delivery was not confirmed; inspect session before retry")
+        else:
+            unconfirmed_idle_at = None
         cur_answer = extract_latest_answer(transcript, min_line) if transcript else ""
         if cur_answer and cur_answer != last_answer:
             last_answer = cur_answer
