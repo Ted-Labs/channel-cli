@@ -252,3 +252,48 @@ class GeminiStreamingEdgeTests(unittest.TestCase):
             # With check_settled=True, actively running task on disk must NOT be cleared
             unfinished = agy_body.transcript_has_unfinished_work(transcript, min_line=0, check_settled=True)
             self.assertTrue(unfinished)
+
+class GeminiUnconfirmedDeliveryTests(unittest.TestCase):
+    def test_interrupt_without_marker_idle_does_not_send_escape(self):
+        interrupt = Mock()
+        calls = iter([False, True])
+        with patch.object(agy_body, "is_online", return_value=True), \
+             patch.object(agy_body, "is_busy", return_value=False), \
+             patch.object(agy_body, "request_transcript", return_value=None), \
+             patch.object(agy_body, "interrupt", interrupt), \
+             patch.object(agy_body.time, "sleep"), \
+             patch("subprocess.run", return_value=Mock(returncode=0)):
+            with self.assertRaisesRegex(agy_body.Interrupted, "unconfirmed"):
+                agy_body.run("request", session="cora", should_interrupt=lambda: next(calls))
+        interrupt.assert_not_called()
+
+    def test_idle_request_without_transcript_fails_before_turn_timeout(self):
+        clock = [0]
+        def sleep(seconds): clock[0] += seconds
+        with patch.object(agy_body, "is_online", return_value=True), \
+             patch.object(agy_body, "is_busy", return_value=False), \
+             patch.object(agy_body, "request_transcript", return_value=None), \
+             patch.object(agy_body.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(agy_body.time, "sleep", side_effect=sleep), \
+             patch("subprocess.run", return_value=Mock(returncode=0)):
+            with self.assertRaisesRegex(ValueError, "delivery was not confirmed"):
+                agy_body.run("request", timeout=1800, session="cora")
+        self.assertLess(clock[0], 60)
+
+    def test_interrupt_without_marker_does_not_interrupt_other_busy_session(self):
+        clock = [0]
+        def sleep(seconds): clock[0] += seconds
+        interrupt = Mock()
+        busy = iter([False] + [True] * 1000)
+        calls = iter([False] + [True] * 1000)
+        with patch.object(agy_body, "is_online", return_value=True), \
+             patch.object(agy_body, "is_busy", side_effect=lambda *_: next(busy)), \
+             patch.object(agy_body, "request_transcript", return_value=None), \
+             patch.object(agy_body, "interrupt", interrupt), \
+             patch.object(agy_body.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(agy_body.time, "sleep", side_effect=sleep), \
+             patch("subprocess.run", return_value=Mock(returncode=0)):
+            with self.assertRaisesRegex(ValueError, "cannot confirm request ownership"):
+                agy_body.run("request", timeout=1800, session="cora", should_interrupt=lambda: next(calls))
+        self.assertLess(clock[0], 25)
+        interrupt.assert_not_called()
