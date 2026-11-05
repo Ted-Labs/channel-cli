@@ -86,7 +86,11 @@ def supervise(home, token, timeout=600):
             finish(store, token, 'failed', 'timed out waiting for running jobs')
             return
         directory = Path.home() / 'Corpus' / 'Atrium'
-        subprocess.run(['tmux', 'kill-session', '-t', '=cweb'], check=False, capture_output=True, timeout=10)
+        kill = subprocess.run(['tmux', 'kill-session', '-t', '=cweb'], capture_output=True, text=True, timeout=10)
+        if kill.returncode != 0:
+            err = (kill.stderr or '').strip()
+            if "can't find session" not in err and "no server running" not in err:
+                raise RuntimeError(f'failed to kill existing cweb: {err}')
         subprocess.run(['sh', str(directory / 'start.sh')], check=True, timeout=30)
         subprocess.run(['tmux', 'has-session', '-t', '=cweb'], check=True, capture_output=True, timeout=10)
         finish(store, token, 'done')

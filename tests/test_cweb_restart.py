@@ -25,6 +25,8 @@ class RestartTest(unittest.TestCase):
 
     @patch('channel_cli.cweb.subprocess.run')
     def test_pause_is_atomic_and_supervisor_restarts_after_running_finishes(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
         first = self.enqueue('first')
         self.store.claim('codex-body')
         second = self.enqueue('second')
@@ -38,6 +40,8 @@ class RestartTest(unittest.TestCase):
 
     @patch('channel_cli.cweb.subprocess.run')
     def test_cancel_unblocks_waiting_queue_without_restart(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
         job = self.enqueue('wait')
         request = cweb.command(self.store, 'restart')
         self.assertEqual(cweb.command(self.store, 'cancel')['state'], 'cancelled')
@@ -72,6 +76,31 @@ class RestartTest(unittest.TestCase):
         self.assertIn('timed out', cweb.status(self.store)['error'])
         self.assertEqual(self.store.claim('codex-body')['id'], pending['id'])
         self.assertEqual(run.call_count, 1)
+
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_kill_session_missing_session_is_tolerated_and_succeeds(self, run):
+        import subprocess as sp
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ['tmux', 'kill-session']:
+                return sp.CompletedProcess(cmd, 1, stdout='', stderr="can't find session: cweb\n")
+            return sp.CompletedProcess(cmd, 0, stdout='', stderr='')
+        run.side_effect = fake_run
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1)
+        self.assertEqual(cweb.status(self.store)['state'], 'done')
+
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_kill_session_unexpected_failure_records_failed_state(self, run):
+        import subprocess as sp
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ['tmux', 'kill-session']:
+                return sp.CompletedProcess(cmd, 1, stdout='', stderr="unexpected tmux server communication failure\n")
+            return sp.CompletedProcess(cmd, 0, stdout='', stderr='')
+        run.side_effect = fake_run
+        request = cweb.command(self.store, 'restart')
+        cweb.supervise(self.store.home, request['token'], timeout=1)
+        self.assertEqual(cweb.status(self.store)['state'], 'failed')
+        self.assertIn('failed to kill existing cweb', cweb.status(self.store)['error'])
 
 
 if __name__ == '__main__':
