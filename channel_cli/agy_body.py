@@ -122,7 +122,105 @@ def extract_latest_answer(transcript_path, min_line=0):
     return ""
 
 
-def transcript_has_unfinished_work(transcript_path, min_line=0):
+def system_generated_dir(transcript_path):
+    if not transcript_path:
+        return None
+    try:
+        path = Path(transcript_path).resolve()
+        if path.parent.name == "logs" and path.parent.parent.name == ".system_generated":
+            return path.parent.parent
+        for candidate in (
+            path.parent.parent,
+            path.parent,
+            path.parent / ".system_generated",
+            path.parent.parent / ".system_generated",
+            path.parent.parent.parent / ".system_generated",
+        ):
+            if candidate.name == ".system_generated" and candidate.exists():
+                return candidate
+            if (candidate / ".system_generated").exists():
+                return candidate / ".system_generated"
+    except Exception:
+        pass
+    return None
+
+
+def check_disk_task_completion(transcript_path, active_tasks, task_step_indices=None):
+    if not transcript_path or not active_tasks:
+        return
+    try:
+        gen_dir = system_generated_dir(transcript_path)
+        if not gen_dir or not gen_dir.exists():
+            return
+
+        completed = set()
+        task_step_indices = task_step_indices or {}
+        for task_id in list(active_tasks):
+            step_idx = task_step_indices.get(task_id)
+            if step_idx is not None:
+                step_file = gen_dir / "steps" / str(step_idx) / "output.txt"
+                if step_file.exists():
+                    try:
+                        txt = step_file.read_text(encoding="utf-8", errors="replace")
+                        if re.search(r"Command exited with code|finished with result|execution was canceled|Completed At:|status\s*[:=]\s*(done|success|error|failed|cancelled|canceled)", txt, re.I):
+                            completed.add(task_id)
+                            continue
+                    except OSError:
+                        pass
+
+            log_file = gen_dir / "tasks" / f"{task_id}.log"
+            if log_file.exists():
+                try:
+                    txt = log_file.read_text(encoding="utf-8", errors="replace")
+                    end_txt = txt[-4096:] if len(txt) > 4096 else txt
+                    if re.search(r"Command exited with code|finished with result|execution was canceled|Completed At:|Task .* finished", end_txt, re.I):
+                        completed.add(task_id)
+                        continue
+                except OSError:
+                    pass
+
+            messages_dir = gen_dir / "messages"
+            if messages_dir.exists():
+                try:
+                    for msg_file in messages_dir.glob("*.json"):
+                        msg_txt = msg_file.read_text(encoding="utf-8", errors="replace")
+                        if task_id in msg_txt and re.search(r"finished with result|was canceled with result|completed", msg_txt, re.I):
+                            completed.add(task_id)
+                            break
+                except OSError:
+                    pass
+
+        active_tasks.difference_update(completed)
+    except Exception:
+        pass
+
+
+def is_task_actively_running_on_disk(transcript_path, task_id, step_index=None):
+    if not transcript_path:
+        return False
+    try:
+        gen_dir = system_generated_dir(transcript_path)
+        if not gen_dir or not gen_dir.exists():
+            return False
+
+        if step_index is not None:
+            step_file = gen_dir / "steps" / str(step_index) / "output.txt"
+            if step_file.exists():
+                return False
+
+        log_file = gen_dir / "tasks" / f"{task_id}.log"
+        if log_file.exists():
+            txt = log_file.read_text(encoding="utf-8", errors="replace")
+            end_txt = txt[-4096:] if len(txt) > 4096 else txt
+            if re.search(r"Command exited with code|finished with result|execution was canceled|Completed At:", end_txt, re.I):
+                return False
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def transcript_has_unfinished_work(transcript_path, min_line=0, check_settled=False):
     """Whether this request has tool work that is still running or unanswered.
 
     Antigravity can emit a planner response before dispatching a command. That
@@ -140,6 +238,7 @@ def transcript_has_unfinished_work(transcript_path, min_line=0):
     latest_answer_line = -1
     latest_work_line = -1
     active_tasks = set()
+    task_step_indices = {}
     task_id_pattern = re.compile(r"\btask-\d+\b", re.I)
     terminal_statuses = {"DONE", "SUCCESS", "ERROR", "FAILED", "CANCELLED", "CANCELED"}
     task_terminal_text = re.compile(
@@ -206,7 +305,12 @@ def transcript_has_unfinished_work(transcript_path, min_line=0):
             # `step_index` is a per-row sequence number, not a stable task ID.
             # Use the background task ID from the tool output; keep anonymous
             # work pending if the transcript did not provide one.
-            active_tasks.update(task_ids or {f"anonymous:{index}"})
+            new_ids = task_ids or {f"anonymous:{index}"}
+            active_tasks.update(new_ids)
+            step_idx = row.get("step_index")
+            if step_idx is not None:
+                for tid in new_ids:
+                    task_step_indices[tid] = step_idx
             if row_type != "SYSTEM_MESSAGE":
                 latest_work_line = index
         elif status in terminal_statuses:
@@ -237,6 +341,15 @@ def transcript_has_unfinished_work(transcript_path, min_line=0):
 
         if row_type == "GENERIC":
             preceding_tool_calls = []
+
+    check_disk_task_completion(transcript_path, active_tasks, task_step_indices)
+
+    if check_settled and active_tasks and latest_answer_line > latest_work_line:
+        still_running = {
+            tid for tid in active_tasks
+            if is_task_actively_running_on_disk(transcript_path, tid, task_step_indices.get(tid))
+        }
+        active_tasks = still_running
 
     # A response before a tool step is progress. Wait for a newer planner
     # response after the step, unless a background task is still active.
@@ -388,7 +501,7 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
             final_answer = extract_latest_answer(transcript, min_line) or last_answer
             if not final_answer or is_busy(session):
                 continue
-            if transcript_has_unfinished_work(transcript, min_line):
+            if transcript_has_unfinished_work(transcript, min_line, check_settled=True):
                 continue
             return Reply(final_answer, session)
 
