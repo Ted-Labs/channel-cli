@@ -88,5 +88,3 @@ class PersonaQueueTest(unittest.TestCase):
             self.store.enqueue('atrium-web:cora', 'dev', 'agy-body', 'a', 'a', persona='pixie')
         with patch.object(agy_body, 'is_agy_session', return_value=False):
             with self.assertRaises(ValueError): agy_body.resolve_session(None, 'atrium-web:pixie')
-        with self.assertRaises(ValueError):
-            adapters.run('claude-body', 'a', '.', None, 1, Path(self.tmp.name), channel='atrium-web:pixie')

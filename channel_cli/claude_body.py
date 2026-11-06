@@ -10,7 +10,9 @@ from pathlib import Path
 from .adapters import Reply, Interrupted
 
 
-def run(prompt, timeout=300, should_interrupt=None):
+def run(prompt, timeout=300, should_interrupt=None, persona="cora"):
+    if persona not in ("cora", "pixie", "gemini"):
+        raise ValueError("invalid Claude persona")
     if should_interrupt and should_interrupt():
         raise Interrupted("stopped before delivering to Cora")
     token = os.environ.get('ATRIUM_TOKEN') or os.environ.get('ARTRIUM_TOKEN')
@@ -48,7 +50,7 @@ def run(prompt, timeout=300, should_interrupt=None):
     path = '/body-runs/' + run_id
     created = False
     try:
-        request('POST', '/body-runs', {'id': run_id, 'agent': 'cora', 'prompt': prompt, 'timeout': timeout, 'meta': meta})
+        request('POST', '/body-runs', {'id': run_id, 'agent': persona, 'prompt': prompt, 'timeout': timeout, 'meta': meta})
         created = True
         ack_deadline = min(deadline, time.monotonic() + 10)
         stop_sent = False
@@ -58,7 +60,7 @@ def run(prompt, timeout=300, should_interrupt=None):
                 answer = state.get('answer')
                 if not isinstance(answer, str) or not answer.strip():
                     raise ValueError('Cora body returned an empty answer')
-                return Reply(answer, 'cora')
+                return Reply(answer, persona)
             if state.get('state') == 'interrupted':
                 raise Interrupted('Cora confirmed interruption')
             if state.get('state') == 'failed':

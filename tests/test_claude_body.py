@@ -40,6 +40,18 @@ class ClaudeBodyTests(unittest.TestCase):
         self.assertEqual(requests[-1].method, 'DELETE')
         self.assertTrue(all(req.get_header('Authorization') == 'Bearer test' for req in requests))
 
+    def test_persona_is_passed_to_transport_and_returned(self):
+        requests = []
+        def urlopen(req, **kwargs):
+            requests.append(req)
+            return Response({'state': 'done', 'answer': 'ok'} if req.method == 'GET' else {})
+        with patch.dict(os.environ, {'ATRIUM_TOKEN': 'test'}), patch('urllib.request.urlopen', side_effect=urlopen):
+            result = adapters.run('claude-body', 'request', '.', None, 3, Path('/unused'), channel='atrium-web:pixie')
+        self.assertEqual(json.loads(requests[0].data)['agent'], 'pixie')
+        self.assertEqual(result.session, 'pixie')
+        with self.assertRaises(ValueError):
+            claude_body.run('request', persona='other')
+
     def test_unacknowledged_delivery_fails_instead_of_succeeding(self):
         ticks = iter([0, 0, 0, 1, 2, 11])
         calls = []
