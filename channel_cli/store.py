@@ -275,7 +275,10 @@ class Store:
         else:
             rows = self.db.execute("SELECT * FROM jobs WHERE state='running'").fetchall()
         for row in rows:
-            self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                self.db.execute("UPDATE jobs SET state='queued',started=NULL,finished=NULL,error=NULL WHERE id=? AND state='running'", (row["id"],))
+                self.event(row["id"], "queued")
 
     def change(self, job_id, action):
         with self.db:
