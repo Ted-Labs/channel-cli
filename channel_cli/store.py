@@ -290,7 +290,10 @@ class Store:
             self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed' AND target_job_id IN (SELECT id FROM jobs WHERE " + query + ")", params)
         rows = self.db.execute("SELECT * FROM jobs WHERE " + query, params).fetchall()
         for row in rows:
-            self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                self.db.execute("UPDATE jobs SET state='queued',started=NULL,finished=NULL,error=NULL WHERE id=? AND state='running'", (row["id"],))
+                self.event(row["id"], "queued")
 
     def change(self, job_id, action):
         with self.db:

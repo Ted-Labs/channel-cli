@@ -306,10 +306,8 @@ class ChannelTests(unittest.TestCase):
         a, b = self.enqueue(), self.enqueue(text='second')
         self.assertEqual(self.store.claim()['id'], a['id'])
         self.store.recover()
-        self.assertEqual(self.store.get(a['id'])['state'], 'interrupted')
-        self.assertEqual(self.store.claim()['id'], b['id'])
-        self.store.change(a['id'], 'retry')
         self.assertEqual(self.store.get(a['id'])['state'], 'queued')
+        self.assertEqual(self.store.claim()['id'], a['id'])
 
     def test_agent_worker_claims_its_fifo_without_waiting_for_other_agents(self):
         cora = self.enqueue(agent='claude-body')
@@ -327,7 +325,7 @@ class ChannelTests(unittest.TestCase):
         self.store.claim('claude-body')
         self.store.claim('codex-body')
         self.store.recover('claude-body')
-        self.assertEqual(self.store.get(cora['id'])['state'], 'interrupted')
+        self.assertEqual(self.store.get(cora['id'])['state'], 'queued')
         self.assertEqual(self.store.get(pixie['id'])['state'], 'running')
 
     def test_agent_worker_completes_pixie_without_claiming_stalled_cora(self):

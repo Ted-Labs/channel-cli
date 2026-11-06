@@ -69,7 +69,7 @@ def finish(store, token, state, error=None):
         store.db.execute('UPDATE cweb_restart SET state=?,updated=?,error=? WHERE id=1 AND token=? AND state IN (\'starting\',\'waiting\',\'restarting\')', (state, time.time(), error, token))
 
 
-def notify_restart(token, elapsed, timeout=60):
+def notify_atrium(payload, timeout=60):
     try:
         auth_token = os.environ.get('ATRIUM_TOKEN') or os.environ.get('ARTRIUM_TOKEN')
         if not auth_token:
@@ -82,12 +82,6 @@ def notify_restart(token, elapsed, timeout=60):
 
         base = os.environ.get('CORPUS_WEB_URL', 'http://127.0.0.1:8790').rstrip('/')
         url = f"{base}/notify"
-        payload = {
-            "topic": "dev",
-            "from": "system",
-            "text": f"✅ cweb 안전 재시작이 완료되었습니다. ({elapsed:.1f}초 소요)",
-            "key": f"cweb-restart:{token[:12]}",
-        }
         data = json.dumps(payload).encode('utf-8')
         headers = {
             'Authorization': f'Bearer {auth_token}',
@@ -102,6 +96,14 @@ def notify_restart(token, elapsed, timeout=60):
                     status_code = getattr(resp, 'status', getattr(resp, 'code', 200))
                     if 200 <= status_code < 300:
                         return
+                    if 400 <= status_code < 500:
+                        return
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500:
+                    return
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
             except Exception:
                 if time.monotonic() >= deadline:
                     break
@@ -110,9 +112,20 @@ def notify_restart(token, elapsed, timeout=60):
         pass
 
 
-def supervise(home, token, timeout=600, notify_timeout=60):
+def notify_restart(token, elapsed, timeout=60):
+    payload = {
+        "topic": "dev",
+        "from": "system",
+        "text": f"✅ cweb 안전 재시작이 완료되었습니다. ({elapsed:.1f}초 소요)",
+        "key": f"cweb-restart:{token[:12]}",
+    }
+    notify_atrium(payload, timeout=timeout)
+
+
+def supervise(home, token, timeout=600, notify_timeout=60, warn_delay=30):
     start_time = time.monotonic()
     store = Store(home)
+    warned = False
     try:
         with store.db:
             store.db.execute("UPDATE cweb_restart SET state='waiting',updated=? WHERE id=1 AND token=? AND state='starting'", (time.time(), token))
@@ -127,9 +140,28 @@ def supervise(home, token, timeout=600, notify_timeout=60):
                 if count == 0:
                     store.db.execute("UPDATE cweb_restart SET state='restarting',updated=? WHERE id=1 AND token=? AND state='waiting'", (time.time(), token))
                     break
-            time.sleep(1)
+            if not warned and (time.monotonic() - start_time) >= warn_delay:
+                warned = True
+                notify_atrium({
+                    "topic": "dev",
+                    "from": "system",
+                    "text": f"⏳ 진행 중인 작업({count}개)이 완료되기를 기다리고 있습니다...",
+                    "key": f"cweb-restart-wait:{token[:12]}",
+                }, timeout=10)
+            remaining = deadline - time.monotonic()
+            if not warned and (start_time + warn_delay) > time.monotonic():
+                next_interval = max(0.01, (start_time + warn_delay) - time.monotonic())
+            else:
+                next_interval = 1.0
+            time.sleep(min(next_interval, max(0.01, remaining)))
         else:
             finish(store, token, 'failed', 'timed out waiting for running jobs')
+            notify_atrium({
+                "topic": "dev",
+                "from": "system",
+                "text": f"⚠️ 진행 중인 작업이 끝나지 않아 cweb 재시작이 취소되었습니다. (타임아웃 {timeout}초 초과)",
+                "key": f"cweb-restart-timeout:{token[:12]}",
+            }, timeout=10)
             return
         directory = Path.home() / 'Corpus' / 'Atrium'
         kill = subprocess.run(['tmux', 'kill-session', '-t', '=cweb'], capture_output=True, text=True, timeout=10)

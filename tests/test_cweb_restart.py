@@ -202,6 +202,41 @@ class RestartTest(unittest.TestCase):
 
         supervise_sig = inspect.signature(cweb.supervise)
         self.assertEqual(supervise_sig.parameters['notify_timeout'].default, 60)
+        self.assertEqual(supervise_sig.parameters['warn_delay'].default, 30)
+
+    @patch('channel_cli.cweb.notify_atrium')
+    @patch('channel_cli.cweb.subprocess.run')
+    def test_supervise_warns_and_notifies_on_timeout(self, run, notify_mock):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ''
+        job = self.enqueue('long-job')
+        self.store.claim('codex-body')
+
+        request = cweb.command(self.store, 'restart')
+        # timeout after 0.2s, warn_delay 0.05s
+        cweb.supervise(self.store.home, request['token'], timeout=0.2, warn_delay=0.05)
+
+        self.assertEqual(cweb.status(self.store)['state'], 'failed')
+        self.assertIn('timed out waiting for running jobs', cweb.status(self.store)['error'])
+        # notify_atrium should have been called twice: once for wait warning, once for timeout
+        self.assertEqual(notify_mock.call_count, 2)
+        warn_payload = notify_mock.call_args_list[0][0][0]
+        self.assertIn('진행 중인 작업(1개)이 완료되기를 기다리고 있습니다', warn_payload['text'])
+        timeout_payload = notify_mock.call_args_list[1][0][0]
+        self.assertIn('cweb 재시작이 취소되었습니다', timeout_payload['text'])
+
+    @patch('channel_cli.cweb.urllib.request.urlopen')
+    def test_notify_atrium_stops_retry_on_client_error(self, urlopen_mock):
+        token_dir = self.home / '.claude/channels/corpus-web'
+        token_dir.mkdir(parents=True, exist_ok=True)
+        (token_dir / 'notify-token').write_text('test-token-123\n')
+
+        # 403 Forbidden shouldn't retry in a loop
+        urlopen_mock.side_effect = urllib.error.HTTPError(
+            'http://127.0.0.1:8790/notify', 403, 'Forbidden', {}, None
+        )
+        cweb.notify_atrium({'text': 'test'}, timeout=5)
+        self.assertEqual(urlopen_mock.call_count, 1)
 
 
 if __name__ == '__main__':
