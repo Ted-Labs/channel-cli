@@ -95,6 +95,7 @@ def parser():
     send = sub.add_parser("send", help="enqueue a message; '-' reads stdin")
     send.add_argument("text")
     send.add_argument("--channel", default="cli")
+    send.add_argument("--persona")
     send.add_argument("--room", default="default")
     send.add_argument("--agent", choices=(*adapters.AGENTS, *adapters.ALIASES))
     send.add_argument('--literal', action='store_true', help='--agent를 사용하며 본문의 @표식을 해석하지 않음')
@@ -106,6 +107,7 @@ def parser():
     worker = sub.add_parser("worker", help="run a priority queue consumer; emits terminal jobs as JSONL")
     worker.add_argument("--once", action="store_true", help="process at most one job")
     worker.add_argument("--drain", action="store_true", help="exit when no jobs remain")
+    worker.add_argument("--persona")
     worker.add_argument("--agent", choices=adapters.BODIES, help="consume only this live-body agent's priority queue")
     worker.add_argument("--timeout", type=positive, default=300, help="seconds per agent call")
     worker.add_argument("--poll", type=positive, default=1, help="idle poll interval in seconds")
@@ -143,18 +145,21 @@ def worker(store, args):
     # legacy/global worker takes the gate exclusively, so old and new workers
     # can never claim jobs concurrently during rollout.
     worker_agent = getattr(args, "agent", None)
+    persona = getattr(args, "persona", None)
+    if persona is not None and not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", persona):
+        raise ValueError("invalid persona")
     with ExitStack() as locks:
         gate = locks.enter_context((store.home / "worker.lock").open("a"))
         try:
-            fcntl.flock(gate, fcntl.LOCK_SH if worker_agent else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(gate, fcntl.LOCK_SH if worker_agent or persona else fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ValueError("another worker is already running for this CHANNEL_HOME") from exc
-        if worker_agent:
-            agent_lock = locks.enter_context((store.home / f"worker-{worker_agent}.lock").open("a"))
+        if worker_agent or persona:
+            agent_lock = locks.enter_context((store.home / f"worker-{persona or worker_agent}.lock").open("a"))
             fcntl.flock(agent_lock, fcntl.LOCK_EX)
-        store.recover(worker_agent)
+        store.recover(worker_agent, persona)
         while True:
-            job = store.claim(worker_agent)
+            job = store.claim(worker_agent, persona)
             if job is None:
                 if store.restart_paused():
                     time.sleep(args.poll)
@@ -257,7 +262,7 @@ def main():
             if args.fresh and decision.agent not in adapters.BODIES[:2]:
                 raise ValueError("--fresh requires codex-body or agy-body")
             emit(store.enqueue(args.channel, args.room, decision.agent, text, decision.prompt, args.cwd,
-                               args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason), args)
+                               args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason, persona=args.persona), args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt
@@ -289,7 +294,7 @@ def main():
                 raise ValueError(f"cannot steer a {job['state']} job")
             if job["agent"] not in adapters.BODIES:
                 raise ValueError(f"steer needs a live body agent, not {job['agent']}")
-            current = store.running(job["agent"])
+            current = store.running(job["agent"], job["persona"])
             if not current:
                 raise ValueError(f"@{job['agent']} has no running turn; the job stays queued")
             mode = adapters.steer(job["agent"], store.turn(current["id"]), job["prompt"])

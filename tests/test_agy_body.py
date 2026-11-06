@@ -62,8 +62,10 @@ class AgyBodyTests(unittest.TestCase):
             self.assertEqual(agy_body.resolve_session('gemini', 'atrium-web:cora'), 'cora')
             self.assertEqual(agy_body.resolve_session(None, 'atrium-web:cora'), 'cora')
         with patch.object(agy_body, 'is_agy_session', side_effect=lambda s: s == 'gemini'):
-            self.assertEqual(agy_body.resolve_session('gemini', 'atrium-web:cora'), 'gemini')
-            self.assertEqual(agy_body.resolve_session(None, 'atrium-web:cora'), 'gemini')
+            with self.assertRaises(ValueError):
+                agy_body.resolve_session('gemini', 'atrium-web:cora')
+            with self.assertRaises(ValueError):
+                agy_body.resolve_session(None, 'atrium-web:cora')
 
     def test_extract_latest_answer_recovers_truncated_content_from_full_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:

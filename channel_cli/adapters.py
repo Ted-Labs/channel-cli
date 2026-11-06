@@ -141,6 +141,8 @@ def steer(agent, turn, text):
 def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_session=None, fresh=False,
         on_part=None, should_interrupt=None, channel=None):
     if agent == "claude-body":
+        if channel and channel.startswith("atrium-web:") and channel != "atrium-web:cora":
+            raise ValueError("claude-body currently supports only the Cora session")
         if fresh:
             raise ValueError("fresh sessions are not supported for claude-body")
         from . import claude_body

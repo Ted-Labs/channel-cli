@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
  message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
  fresh INTEGER NOT NULL DEFAULT 0, fresh_started INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'queued', priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100),
- tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker')), assignment_reason TEXT,
+ tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker')), assignment_reason TEXT, persona TEXT,
  answer TEXT, error TEXT,
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
@@ -76,6 +76,9 @@ class Store:
                         self.db.execute("UPDATE jobs SET tier='worker' WHERE agent NOT IN ('codex-body', 'agy-body', 'claude-body')")
                     if "assignment_reason" not in columns:
                         self.db.execute("ALTER TABLE jobs ADD COLUMN assignment_reason TEXT")
+                    if "persona" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN persona TEXT")
+                    self.db.execute("CREATE INDEX IF NOT EXISTS jobs_persona_queue ON jobs(state, persona, priority DESC, seq ASC)")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_queue_priority ON jobs(state, priority DESC, seq ASC)")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_agent_queue_priority ON jobs(state, agent, priority DESC, seq ASC)")
                     self.db.commit()
@@ -115,7 +118,9 @@ class Store:
         self.db.execute("INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)",
                         (job_id, kind, time.time(), json.dumps(job, ensure_ascii=False)))
 
-    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90, tier=None, assignment_reason=None):
+    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90, tier=None, assignment_reason=None, persona=None):
+        if persona is not None and (not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", persona) or channel != f"atrium-web:{persona}"):
+            raise ValueError("invalid persona or channel mismatch")
         if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
             raise ValueError("priority must be an integer from 0 to 100")
         tier = tier or ("body" if agent in ("codex-body", "agy-body", "claude-body") else "worker")
@@ -131,7 +136,7 @@ class Store:
                                            (channel, room, message_id)).fetchone()
                 if existing:
                     if (existing["text"] != text or existing["agent"] != agent or
-                            existing["fresh"] != int(fresh) or existing["priority"] != priority or existing["tier"] != tier or existing["assignment_reason"] != assignment_reason):
+                            existing["fresh"] != int(fresh) or existing["priority"] != priority or existing["tier"] != tier or existing["assignment_reason"] != assignment_reason or existing["persona"] != persona):
                         raise ValueError("message-id already used with different content, agent, fresh flag, or priority")
                     return dict(existing)
             bound = self.db.execute("SELECT cwd FROM rooms WHERE channel=? AND room=?", (channel, room)).fetchone()
@@ -150,22 +155,32 @@ class Store:
                 target = str(workspace)
             self.db.execute("INSERT OR IGNORE INTO rooms VALUES(?,?,?)", (channel, room, target))
             job_id = uuid.uuid4().hex
-            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,tier,assignment_reason,created)
-                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, tier, assignment_reason, time.time()))
+            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,tier,assignment_reason,persona,created)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, tier, assignment_reason, persona, time.time()))
             self.event(job_id, "queued")
         return self.get(job_id)
 
-    def claim(self, agent=None):
+    def claim(self, agent=None, persona=None):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if self.db.execute("SELECT 1 FROM cweb_restart WHERE id=1 AND state IN ('starting','waiting','restarting')").fetchone():
                 return None
+            where, params = ["j.state='queued'"], []
+            if persona is not None:
+                where.append("j.persona=?")
+                params.append(persona)
+            elif agent:
+                where.append("j.persona IS NULL")
             if agent:
-                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' AND agent=? ORDER BY priority DESC, seq ASC LIMIT 1",
-                                      (agent,)).fetchone()
-            else:
-                row = self.db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY priority DESC, seq ASC LIMIT 1").fetchone()
+                where.append("j.agent=?")
+                params.append(agent)
+            # Legacy jobs can target the same live session as a persona job.
+            where.append("""NOT EXISTS (SELECT 1 FROM jobs r WHERE r.state='running' AND
+                ((j.persona IS NOT NULL AND (r.persona=j.persona OR (r.persona IS NULL AND r.channel=j.channel AND j.channel LIKE 'atrium-web:%'))) OR
+                 (j.persona IS NULL AND (r.persona IS NOT NULL AND r.channel=j.channel AND j.channel LIKE 'atrium-web:%'))))""")
+            row = self.db.execute("SELECT j.id FROM jobs j WHERE " + " AND ".join(where) +
+                                  " ORDER BY j.priority DESC, j.seq ASC LIMIT 1", params).fetchone()
             if not row:
                 return None
             self.db.execute("UPDATE jobs SET state='running',started=?,finished=NULL,answer=NULL,attempts=attempts+1 WHERE id=?",
@@ -261,19 +276,19 @@ class Store:
                             (reason, time.time(), source_job_id))
             self.event(source_job_id, "failed")
 
-    def recover(self, agent=None):
-        # Called only while holding the matching worker lock(s).
+    def recover(self, agent=None, persona=None):
+        # The caller owns the corresponding exclusive worker lock.
+        where, params = ["state='running'"], []
+        if persona is not None:
+            where.append("persona=?")
+            params.append(persona)
+        elif agent:
+            where.extend(["agent=?", "persona IS NULL"])
+            params.append(agent)
+        query = " AND ".join(where)
         with self.db:
-            if agent:
-                self.db.execute("""UPDATE steer_requests SET state='pending'
-                                  WHERE state='claimed' AND target_job_id IN
-                                  (SELECT id FROM jobs WHERE state='running' AND agent=?)""", (agent,))
-            else:
-                self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed'")
-        if agent:
-            rows = self.db.execute("SELECT * FROM jobs WHERE state='running' AND agent=?", (agent,)).fetchall()
-        else:
-            rows = self.db.execute("SELECT * FROM jobs WHERE state='running'").fetchall()
+            self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed' AND target_job_id IN (SELECT id FROM jobs WHERE " + query + ")", params)
+        rows = self.db.execute("SELECT * FROM jobs WHERE " + query, params).fetchall()
         for row in rows:
             self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
 
@@ -325,9 +340,9 @@ class Store:
         row = self.db.execute("SELECT thread, turn FROM turns WHERE job_id=?", (self.get(job_id)["id"],)).fetchone()
         return (row["thread"], row["turn"]) if row else None
 
-    def running(self, agent):
-        row = self.db.execute("SELECT id FROM jobs WHERE state='running' AND agent=? ORDER BY seq DESC LIMIT 1",
-                              (agent,)).fetchone()
+    def running(self, agent, persona=None):
+        row = self.db.execute("SELECT id FROM jobs WHERE state='running' AND agent=? AND persona IS ? ORDER BY seq DESC LIMIT 1",
+                              (agent, persona)).fetchone()
         return self.get(row["id"]) if row else None
 
     def steered(self, job_id, into, defer_prompt=None):
@@ -338,7 +353,7 @@ class Store:
             if job["state"] != "queued":
                 raise ValueError(f"cannot steer a {job['state']} job")
             target = self.get(into)
-            if target["state"] != "running" or target["agent"] != job["agent"]:
+            if target["state"] != "running" or target["agent"] != job["agent"] or target["persona"] != job["persona"]:
                 raise ValueError("target job is no longer running for this agent")
             if defer_prompt is not None:
                 self.db.execute("INSERT INTO steer_requests(source_job_id,target_job_id,prompt,created) VALUES(?,?,?,?)",
