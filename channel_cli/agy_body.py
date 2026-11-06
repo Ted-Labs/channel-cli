@@ -63,7 +63,9 @@ def resolve_session(session=None, channel=None):
     if not channel:
         return session or default_session()
     candidate = session_for_channel(channel)
-    if candidate and is_agy_session(candidate):
+    if candidate:
+        if not is_agy_session(candidate):
+            raise ValueError(f"Gemini session for {channel} is not online: {candidate}")
         return candidate
     if session and is_agy_session(session):
         return session

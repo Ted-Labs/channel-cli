@@ -145,8 +145,9 @@ def pick_thread(conn, notes, preferred_cwd=None):
         want = os.path.realpath(preferred_cwd)
         matched = sorted([r for r in live if r.get("cwd") and os.path.realpath(r["cwd"]) == want],
                          key=lambda r: r.get("updatedAt") or 0, reverse=True)[:1]
-        if matched:
-            live = matched
+        if not matched:
+            raise ValueError(f"no Codex thread for persona workspace: {preferred_cwd}")
+        live = matched
     live = [r["id"] for r in live]
     if len(live) != 1:
         raise ValueError(f"expected one persisted Codex thread on the daemon, found {len(live)}; "
