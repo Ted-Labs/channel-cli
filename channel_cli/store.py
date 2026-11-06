@@ -290,10 +290,17 @@ class Store:
             self.db.execute("UPDATE steer_requests SET state='pending' WHERE state='claimed' AND target_job_id IN (SELECT id FROM jobs WHERE " + query + ")", params)
         rows = self.db.execute("SELECT * FROM jobs WHERE " + query, params).fetchall()
         for row in rows:
-            with self.db:
-                self.db.execute("BEGIN IMMEDIATE")
-                self.db.execute("UPDATE jobs SET state='queued',started=NULL,finished=NULL,error=NULL WHERE id=? AND state='running'", (row["id"],))
-                self.event(row["id"], "queued")
+            # 본체에 아직 전달되지 않은 작업만 다시 줄 세운다. codex-body·agy-body 는 전달 직후 turns 를 남기므로
+            # turns 가 있으면 이미 에이전트가 받은 것이다. 다시 보내면 같은 일을 두 번 시키게 되므로 끊김으로 남긴다.
+            # claude-body 와 CLI 작업은 전달 여부를 알 수 없어 예전처럼 끊김으로 남긴다.
+            delivered = self.db.execute("SELECT 1 FROM turns WHERE job_id=?", (row["id"],)).fetchone()
+            if row["agent"] in ("codex-body", "agy-body") and not delivered:
+                with self.db:
+                    self.db.execute("BEGIN IMMEDIATE")
+                    self.db.execute("UPDATE jobs SET state='queued',started=NULL,finished=NULL,error=NULL WHERE id=? AND state='running'", (row["id"],))
+                    self.event(row["id"], "queued")
+            else:
+                self.finish(dict(row), "interrupted", error="worker stopped before recording completion; inspect logs before retry")
 
     def change(self, job_id, action):
         with self.db:

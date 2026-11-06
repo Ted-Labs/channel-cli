@@ -80,7 +80,7 @@ class PersonaQueueTest(unittest.TestCase):
         self.enqueue('gemini')
         other = self.store.claim(persona='gemini')
         self.store.recover('agy-body')
-        self.assertEqual(self.store.get(first['id'])['state'], 'interrupted')
+        self.assertEqual(self.store.get(first['id'])['state'], 'queued')
         self.assertEqual(self.store.get(other['id'])['state'], 'running')
         self.assertIsNotNone(self.store.claim('agy-body'))
     def test_invalid_channel_and_unsafe_fallback_are_rejected(self):
