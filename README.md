@@ -127,3 +127,11 @@ codex-body는 app-server turn steer를, claude-body·agy-body는 현재 응답 �
 `atrium cweb restart`는 새 작업의 실행 시작을 잠시 멈추고 독립 tmux 감시자를 시작한다. 감시자는 실행 중인 작업이 끝나면 cweb을 재시작하고 대기 작업을 다시 진행한다. `atrium cweb status`로 상태와 오류를 확인하고, 재시작 시작 전에는 `atrium cweb cancel`로 취소할 수 있다. 감시자가 비정상 종료해 상태가 멈춘 경우, 최소 30초 뒤 `atrium cweb recover`로 감시 세션이 사라졌는지 확인하고 잠금을 해제할 수 있다. `done`은 cweb tmux 세션의 시작을 뜻하며 HTTP 상태까지 보증하지 않는다.
 
 모든 실행 중인 큐 worker가 이 버전의 `claim`을 사용해야 새 작업 시작이 차단된다. 기존 worker는 새 버전 배포 후 안전하게 교체해야 한다. 기본 호스트 큐에서만 재시작을 요청할 수 있다.
+
+## Claude 개인/Team 계정
+
+`atrium account`로 현재 선택을 보고, `atrium account personal|team`으로 다음 Claude 실행에 사용할 계정을 고른다. 선택은 `~/.config/atrium/claude-account.json` 한 곳에 저장하며 즉시 본체나 서버를 재시작하지 않는다.
+
+개인은 기존 `~/.claude`와 `~/.claude.json`, Team은 `~/.claude-team`과 그 안의 `.claude.json`을 사용한다. Team 선택 시 settings.json·settings.local.json·CLAUDE.md·skills·hooks만 개인 폴더에 심볼릭 링크한다. 인증과 세션 기록은 연결하지 않는다. 기존 파일이나 인증 공유 링크가 있으면 덮어쓰지 않고 거부한다.
+
+Team 로그인은 사용자가 `CLAUDE_CONFIG_DIR="$HOME/.claude-team" claude auth login`으로 직접 수행한다. `account` 명령은 로그인하지 않으며 인증 파일을 복사하거나 생성하지 않는다. `--json` 조회도 지원한다.

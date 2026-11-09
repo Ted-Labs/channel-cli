@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from . import adapters, body, web, cweb
+from . import adapters, body, web, cweb, accounts
 from .store import Store
 from .output import emit as display
 
@@ -90,6 +90,8 @@ def parser():
     p.add_argument('--json', action='store_true', help='채널 연동용 JSON 출력')
     p.add_argument("--home", default=os.environ.get("CHANNEL_HOME", str(Path.home() / ".local/state/channel")))
     sub = p.add_subparsers(dest="command", required=True)
+    account = sub.add_parser('account', help='Claude 개인/Team 계정 선택 (다음 재시작부터 적용)')
+    account.add_argument('profile', nargs='?', choices=accounts.PROFILES)
     agents = sub.add_parser("agents", help="설치된 에이전트 보기")
     agents.add_argument('--verbose', '-v', action='store_true', help='실행 파일 경로도 표시')
     send = sub.add_parser("send", help="enqueue a message; '-' reads stdin")
@@ -235,6 +237,17 @@ def main():
         return web.run(args, command_parser)
     if args.command in ("claude", "cora"):
         return web.change(args.command, args.model_args)
+    if args.command == 'account':
+        import json
+        try:
+            result = accounts.choose(args.profile) if args.profile else accounts.describe()
+        except (ValueError, OSError) as error:
+            command_parser.error(str(error))
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print(f"Claude 계정: {result['label']} ({result['account']}) · 다음 재시작부터 적용")
+        return
     store = None
     old_term = signal.getsignal(signal.SIGTERM)
     try:

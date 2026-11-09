@@ -1,4 +1,5 @@
 """Native CLI transports. Execute argument lists without a shell."""
+from .accounts import launch_env
 import json
 import os
 import shutil
@@ -171,7 +172,8 @@ def run(agent, prompt, cwd, session, timeout, logs, on_turn=None, on_session=Non
         cmd[0] = executable
         with (logs / "stdout.log").open("w+") as out, (logs / "stderr.log").open("w+") as err:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=out,
-                                    stderr=err, text=True, start_new_session=True)
+                                    stderr=err, text=True, start_new_session=True,
+                                    env=launch_env() if agent == "claude" else None)
             try:
                 # agy print mode requires a prompt argument; other adapters read stdin.
                 proc.communicate("" if agent == "agy" else prompt, timeout=timeout)
