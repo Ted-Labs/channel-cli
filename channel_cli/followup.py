@@ -94,5 +94,41 @@ def authorized(identity, pid):
     return False
 
 
+def caller_persona(pid):
+    """Return the live body persona whose process tree started ``pid``, or None.
+
+    A clone (persona-less engine run) may only be given work and read back by
+    the body that owns it, so the caller must descend from that body's pane
+    (or, for Codex, its app-server daemon) without crossing another engine
+    process or a forked/background session.
+    """
+    for persona in PERSONAS:
+        try:
+            current = pane(persona)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        if any(a.startswith(('--fork-session', '--bg-spare', '--bg-pty-host')) for a in current['args']):
+            continue
+        roots = {current['pid']}
+        if persona == 'pixie':
+            try:
+                roots.add(daemon()['pid'])
+            except (OSError, ValueError):
+                pass
+        walk, seen = int(pid), set()
+        try:
+            while walk > 1 and walk not in seen and len(seen) < 64:
+                if walk in roots:
+                    return persona
+                seen.add(walk)
+                row = process(walk)
+                if any(Path(arg).name in ('claude', 'codex', 'agy', 'gemini') or arg.startswith(('--fork-session', '--bg-spare', '--bg-pty-host')) for arg in row['args'][:2]):
+                    break
+                walk = row['parent']
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def prompt(job, text):
     return text + f"\n\n[Atrium 후속 알림]\n공통 큐 작업 ID: {job['id']}. 완료된 뒤 추가 결과만 atrium followup --agent {job['persona']} --job-id {job['id']} --text '<후속 알림>' 으로 게시한다(원 요청 답장, 24시간 이내, 최대 3개). 최종 답을 중복 게시하지 않는다."

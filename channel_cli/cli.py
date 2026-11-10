@@ -107,6 +107,8 @@ def parser():
     followup_claim.add_argument('--persona', required=True, choices=('cora', 'pixie', 'gemini'))
     followup_claim.add_argument('--client-pid', required=True, type=int)
     followup_claim.add_argument('--request-id', required=True)
+    caller = sub.add_parser('caller-persona', help='identify the live body persona that started a process')
+    caller.add_argument('--pid', required=True, type=int)
     agents = sub.add_parser("agents", help="설치된 에이전트 보기")
     agents.add_argument('--verbose', '-v', action='store_true', help='실행 파일 경로도 표시')
     send = sub.add_parser("send", help="enqueue a message; '-' reads stdin")
@@ -302,6 +304,9 @@ def main():
                 emit(store.reserve_followup(args.job_id, args.persona, args.client_pid, args.request_id), args)
             except ValueError as error:
                 emit({'error': str(error), 'status': getattr(error, 'status', 404)}, args)
+        elif args.command == 'caller-persona':
+            from .followup import caller_persona
+            emit({'pid': args.pid, 'persona': caller_persona(args.pid)}, args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt
