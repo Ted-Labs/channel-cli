@@ -85,6 +85,16 @@ def priority_value(value):
     return n
 
 
+def revision_value(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('revision must be a positive integer') from None
+    if not 1 <= number <= 2**53 - 1:
+        raise argparse.ArgumentTypeError('revision must be a positive safe integer')
+    return number
+
+
 def parser():
     p = argparse.ArgumentParser(prog="atrium", description="에이전트 실행 큐와 웹 대화를 하나의 Atrium CLI로 관리합니다.")
     p.add_argument('--json', action='store_true', help='채널 연동용 JSON 출력')
@@ -102,6 +112,7 @@ def parser():
     send.add_argument("--agent", choices=(*adapters.AGENTS, *adapters.ALIASES))
     send.add_argument('--literal', action='store_true', help='--agent를 사용하며 본문의 @표식을 해석하지 않음')
     send.add_argument("--priority", type=priority_value, default=90, help="queue priority from 0 to 100 (default: 90)")
+    send.add_argument("--canvas-revision", type=revision_value, help="workflow revision pinned at enqueue")
     send.add_argument("--assignment-reason", help="assignment rationale")
     send.add_argument("--cwd", help="bind the room to an existing directory on its first message")
     send.add_argument("--message-id", help="channel delivery key for idempotent enqueue")
@@ -275,7 +286,7 @@ def main():
             if args.fresh and decision.agent not in adapters.BODIES[:2]:
                 raise ValueError("--fresh requires codex-body or agy-body")
             emit(store.enqueue(args.channel, args.room, decision.agent, text, decision.prompt, args.cwd,
-                               args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason, persona=args.persona), args)
+                               args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason, persona=args.persona, canvas_revision=int(args.canvas_revision) if args.canvas_revision is not None else None), args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt

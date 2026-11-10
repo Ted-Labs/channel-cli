@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
  message_id TEXT, text TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
  fresh INTEGER NOT NULL DEFAULT 0, fresh_started INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'queued', priority INTEGER NOT NULL DEFAULT 90 CHECK(priority BETWEEN 0 AND 100),
- tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker')), assignment_reason TEXT, persona TEXT,
+ tier TEXT NOT NULL DEFAULT 'body' CHECK(tier IN ('body', 'worker')), assignment_reason TEXT, persona TEXT, canvas_revision INTEGER,
  answer TEXT, error TEXT,
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
@@ -78,6 +78,8 @@ class Store:
                         self.db.execute("ALTER TABLE jobs ADD COLUMN assignment_reason TEXT")
                     if "persona" not in columns:
                         self.db.execute("ALTER TABLE jobs ADD COLUMN persona TEXT")
+                    if "canvas_revision" not in columns:
+                        self.db.execute("ALTER TABLE jobs ADD COLUMN canvas_revision INTEGER")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_persona_queue ON jobs(state, persona, priority DESC, seq ASC)")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_queue_priority ON jobs(state, priority DESC, seq ASC)")
                     self.db.execute("CREATE INDEX IF NOT EXISTS jobs_agent_queue_priority ON jobs(state, agent, priority DESC, seq ASC)")
@@ -118,11 +120,13 @@ class Store:
         self.db.execute("INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)",
                         (job_id, kind, time.time(), json.dumps(job, ensure_ascii=False)))
 
-    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90, tier=None, assignment_reason=None, persona=None):
+    def enqueue(self, channel, room, agent, text, prompt, cwd=None, message_id=None, fresh=False, priority=90, tier=None, assignment_reason=None, persona=None, canvas_revision=None):
         if persona is not None and (not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", persona) or channel != f"atrium-web:{persona}"):
             raise ValueError("invalid persona or channel mismatch")
         if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
             raise ValueError("priority must be an integer from 0 to 100")
+        if canvas_revision is not None and (isinstance(canvas_revision, bool) or not isinstance(canvas_revision, int) or not 1 <= canvas_revision <= 2**53 - 1):
+            raise ValueError("invalid canvas revision")
         tier = tier or ("body" if agent in ("codex-body", "agy-body", "claude-body") else "worker")
         if tier not in ("body", "worker"):
             raise ValueError("invalid tier")
@@ -155,9 +159,9 @@ class Store:
                 target = str(workspace)
             self.db.execute("INSERT OR IGNORE INTO rooms VALUES(?,?,?)", (channel, room, target))
             job_id = uuid.uuid4().hex
-            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,tier,assignment_reason,persona,created)
-                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, tier, assignment_reason, persona, time.time()))
+            self.db.execute("""INSERT INTO jobs(id,channel,room,agent,message_id,text,prompt,cwd,fresh,priority,tier,assignment_reason,persona,canvas_revision,created)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (job_id, channel, room, agent, message_id, text, prompt, target, int(fresh), priority, tier, assignment_reason, persona, canvas_revision, time.time()))
             self.event(job_id, "queued")
         return self.get(job_id)
 
@@ -416,13 +420,13 @@ class Store:
             "message_id": row["message_id"], "state": row["state"],
             "priority": row["priority"], "tier": row["tier"], "assignment_reason": row["assignment_reason"], "seq": row["seq"],
             "created": row["created"], "started": row["started"],
-            "finished": row["finished"], "attempts": row["attempts"],
+            "finished": row["finished"], "attempts": row["attempts"], "canvas_revision": row["canvas_revision"],
             "title": title or "웹 채팅 요청",
         }
 
     def snapshot(self, channel_prefix="", per_agent_limit=50, recent_limit=12, only_lane=None, offset=0):
         """Return bounded, prompt-free queue data grouped by channel lane."""
-        columns = "id,channel,room,agent,message_id,state,priority,tier,assignment_reason,seq,created,started,finished,attempts,text"
+        columns = "id,channel,room,agent,message_id,state,priority,tier,assignment_reason,seq,created,started,finished,attempts,canvas_revision,text"
         prefix = str(channel_prefix)
         where = "channel LIKE ? ESCAPE '\\'" if prefix else "1=1"
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

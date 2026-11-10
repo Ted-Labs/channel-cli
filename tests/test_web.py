@@ -16,6 +16,7 @@ class WebTests(unittest.TestCase):
     def setUpClass(cls):
         cls.requests = []
         cls.fail_cora_usage = False
+        cls.canvas_result = None
 
         class Handler(BaseHTTPRequestHandler):
             def handle_request(self):
@@ -28,7 +29,13 @@ class WebTests(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(b'usage unavailable')
                     return
+                if self.path == '/canvas/workflow/route' and cls.canvas_result == 'unavailable':
+                    self.send_response(404)
+                    self.end_headers()
+                    return
                 response = {'ok': True}
+                if self.path == '/canvas/workflow/route':
+                    response = cls.canvas_result or {'target': 'pixie', 'revision': None}
                 if self.path == '/agents':
                     response = {'runtimes': [
                         {'id': 'cora', 'state': 'busy', 'queued': 0},
@@ -72,6 +79,7 @@ class WebTests(unittest.TestCase):
         self.home = Path(tmp.name)
         self.requests.clear()
         type(self).fail_cora_usage = False
+        type(self).canvas_result = None
         self.url = f'http://127.0.0.1:{self.server.server_port}'
         self.env = {**os.environ, 'HOME': str(self.home), 'CHANNEL_HOME': str(self.home / 'queue'),
                     'PYTHONPATH': str(ROOT), 'CORPUS_WEB_URL': self.url,
@@ -130,6 +138,20 @@ class WebTests(unittest.TestCase):
         self.assertFalse(body["assignmentQueued"])
         self.assertIn("픽시", body["assignmentReason"])
 
+    def test_assign_reads_active_revision_and_keeps_legacy_without_active(self):
+        legacy = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
+        self.assertEqual((legacy['target'], legacy['canvas_revision']), ('pixie', None))
+        type(self).canvas_result = {'target': 'gemini', 'revision': 12, 'priority': 72}
+        changed = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
+        self.assertEqual((changed['target'], changed['canvas_revision'], changed['priority']), ('gemini', 12, 72))
+        self.assertTrue(changed['queued'])
+        self.assertEqual(self.requests[-1][1], '/canvas/workflow/route')
+
+    def test_assign_falls_back_when_old_server_has_no_canvas_route(self):
+        type(self).canvas_result = 'unavailable'
+        result = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
+        self.assertEqual((result['target'], result['canvas_revision']), ('pixie', None))
+
     def test_assign_skips_busy_and_low_quota_candidates(self):
         result = json.loads(self.cli('--json', 'assign', '조사', '보통').stdout)
         self.assertEqual(result['target'], 'pixie')
@@ -139,7 +161,7 @@ class WebTests(unittest.TestCase):
         self.assertTrue(result['available'])
         self.assertEqual(result['considered'][0]['agent'], 'gemini')
         self.assertIn('Gemini', result['reason'])
-        self.assertEqual([row[1] for row in self.requests], ['/agents', '/sys/usage', '/sys/usage/agents'])
+        self.assertEqual([row[1] for row in self.requests], ['/agents', '/sys/usage', '/sys/usage/agents', '/canvas/workflow/route'])
 
     def test_assign_and_usage_tolerate_cora_usage_502(self):
         type(self).fail_cora_usage = True

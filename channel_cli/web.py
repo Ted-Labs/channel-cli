@@ -8,7 +8,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from .assignment import recommend
+from .assignment import recommend, _used_percent, POLICY
 
 COMMANDS = ('reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage', 'assign')
 
@@ -77,14 +77,31 @@ def run(a, p):
             token = ""
     base = os.environ.get("CORPUS_WEB_URL", "http://127.0.0.1:8790")
 
-    def request(path, method="GET", body=None, timeout=10, allow_error=False):
+    def request(path, method="GET", body=None, timeout=10, allow_error=False, optional_route=False):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(base+path, data=data, headers={"authorization":"Bearer "+token, "content-type":"application/json"}, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as res: return json.loads(res.read().decode())
-        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+            if optional_route and (isinstance(exc, json.JSONDecodeError) or not isinstance(exc, urllib.error.HTTPError) or exc.code in (404, 503)): return None
             if allow_error: return None
             print(f"atrium: {exc}", file=sys.stderr); raise SystemExit(1)
+
+    def with_canvas(decision, runtimes, allowed=None, cora_usage=None, agent_usage=None):
+        result = request('/canvas/workflow/route', 'POST', {'preferred': decision['target'], 'runtimes': runtimes, **({'allowed': list(allowed)} if allowed else {})}, optional_route=True)
+        if not result or result.get('revision') is None:
+            return {**decision, 'canvas_revision': None}
+        target = result.get('target')
+        if target not in ('cora', 'pixie', 'gemini') or allowed and target not in allowed:
+            p.error('active canvas returned an invalid target')
+        updated = {**decision, 'target': target, 'canvas_revision': result['revision'], 'priority': result.get('priority') if result.get('priority') is not None else decision['priority'], 'reason': f"캔버스 revision {result['revision']}: {target} 배정 (기본 추천: {decision['target']})"}
+        if target != decision['target']:
+            runtime = next((r for r in (runtimes or []) if r.get('id') == target), {}) if isinstance(runtimes, list) else (runtimes or {}).get(target, {})
+            used = _used_percent(target, cora_usage, agent_usage or {})
+            threshold = POLICY['thresholds']['hard_remaining_percent' if decision['difficulty'] == '어려움' else 'default_remaining_percent']
+            available = runtime.get('state') == 'idle' and not runtime.get('queued', 0) and used is not None and used <= 100 - threshold
+            updated.update(available=available, queued=not available, preferenceRank=0)
+        return updated
 
     if a.action == "assign":
         if not a.subject or not a.body or a.relay_thread or a.topic or a.text or a.put or a.goal or a.reason:
@@ -93,7 +110,7 @@ def run(a, p):
         cora_usage = request("/sys/usage", timeout=15, allow_error=True)
         agent_usage = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
         try:
-            result = recommend(a.subject, a.body, runtimes, cora_usage, agent_usage)
+            result = with_canvas(recommend(a.subject, a.body, runtimes, cora_usage, agent_usage), runtimes, cora_usage=cora_usage, agent_usage=agent_usage)
         except ValueError as exc:
             p.error(str(exc))
         if a.json:
@@ -226,7 +243,10 @@ def run(a, p):
         if auto:
             if a.subject and a.subject != "auto": p.error("automatic assignment cannot specify a target")
             try:
-                decision = recommend(a.role, a.difficulty, request("/agents").get("runtimes"), request("/sys/usage", timeout=15, allow_error=True), request("/sys/usage/agents", timeout=15, allow_error=True) or {}, allowed={"pixie", "gemini"})
+                runtimes = request("/agents").get("runtimes")
+                cora_usage = request("/sys/usage", timeout=15, allow_error=True)
+                agent_usage = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
+                decision = with_canvas(recommend(a.role, a.difficulty, runtimes, cora_usage, agent_usage, allowed={"pixie", "gemini"}), runtimes, {"pixie", "gemini"}, cora_usage, agent_usage)
             except ValueError as exc: p.error(str(exc))
             a.subject = decision["target"]
         if a.text is not None: p.error(f"{a.action} text is positional")
