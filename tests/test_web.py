@@ -15,6 +15,7 @@ class WebTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.requests = []
+        cls.followup_headers = []
         cls.fail_cora_usage = False
         cls.canvas_result = None
 
@@ -34,6 +35,8 @@ class WebTests(unittest.TestCase):
                     self.end_headers()
                     return
                 response = {'ok': True}
+                if self.path == '/notify/followup':
+                    cls.followup_headers.append(dict(self.headers))
                 if self.path == '/canvas/workflow/route':
                     response = cls.canvas_result or {'target': 'pixie', 'revision': None}
                 if self.path == '/agents':
@@ -99,6 +102,26 @@ class WebTests(unittest.TestCase):
         for command in ('send', 'worker', 'reply', 'share', 'usage', 'assign'):
             self.assertIn(command, result.stdout)
         self.assertFalse((self.home / 'queue').exists())
+        self.assertEqual(self.requests, [])
+
+    def test_followup_uses_current_body_owner_and_server_destination(self):
+        state = self.home / '.claude/channels/corpus-web'
+        state.mkdir(parents=True)
+        (state / 'body-owner-pixie.json').write_text(json.dumps({'agent': 'pixie', 'pid': 123, 'owner': 'body-proof'}))
+        self.cli('followup', '--agent', 'pixie', '--run-id', '123', '--text', '후속 알림')
+        method, path, auth, payload = self.requests[-1]
+        self.assertEqual((method, path, auth), ('POST', '/notify/followup', 'Bearer test-new'))
+        self.assertEqual(payload, {'agent': 'pixie', 'runId': '123', 'text': '후속 알림'})
+        headers = {k.lower(): v for k, v in self.followup_headers[-1].items()}
+        self.assertEqual(headers['x-atrium-owner'], 'body-proof')
+        self.assertEqual(headers['x-atrium-persona'], 'pixie')
+        self.assertTrue(headers['x-atrium-client-pid'].isdigit())
+        self.assertFalse((self.home / 'queue').exists())
+        self.cli('followup', '--agent', 'pixie', '--run-id', '123', '--text', 'bad', '--topic', 'other', expected=2)
+
+    def test_followup_without_owner_or_required_run_is_rejected_locally(self):
+        self.cli('followup', '--agent', 'cora', '--run-id', '123', '--text', '알림', expected=2)
+        self.cli('followup', '--agent', 'cora', '--text', '알림', expected=2)
         self.assertEqual(self.requests, [])
 
     def test_reply_preserves_literal_text_and_does_not_create_queue(self):

@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from .assignment import recommend, _used_percent, POLICY
 
-COMMANDS = ('reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage', 'assign')
+COMMANDS = ('followup', 'reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage', 'assign')
 
 def add_arguments(p):
     p.add_argument("subject", nargs="?")
@@ -68,7 +68,7 @@ def change(who, rest):
 
 
 def run(a, p):
-    if a.run_id and a.action != "reply": p.error("--run-id is only for reply")
+    if a.run_id and a.action not in ("reply", "followup"): p.error("--run-id is only for reply/followup")
     token = (os.environ.get("ATRIUM_TOKEN") or os.environ.get("ARTRIUM_TOKEN"))
     if not token:
         try: token = (pathlib.Path.home()/".claude/channels/corpus-web/notify-token").read_text().strip()
@@ -77,15 +77,32 @@ def run(a, p):
             token = ""
     base = os.environ.get("CORPUS_WEB_URL", "http://127.0.0.1:8790")
 
-    def request(path, method="GET", body=None, timeout=10, allow_error=False, optional_route=False):
+    def request(path, method="GET", body=None, timeout=10, allow_error=False, optional_route=False, extra_headers=None):
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(base+path, data=data, headers={"authorization":"Bearer "+token, "content-type":"application/json"}, method=method)
+        req = urllib.request.Request(base+path, data=data, headers={"authorization":"Bearer "+token, "content-type":"application/json", **(extra_headers or {})}, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as res: return json.loads(res.read().decode())
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
             if optional_route and (isinstance(exc, json.JSONDecodeError) or not isinstance(exc, urllib.error.HTTPError) or exc.code in (404, 503)): return None
             if allow_error: return None
-            print(f"atrium: {exc}", file=sys.stderr); raise SystemExit(1)
+            detail = exc.read().decode('utf8', errors='replace')[:1000] if a.action == 'followup' and isinstance(exc, urllib.error.HTTPError) else str(exc)
+            print(f"atrium: {detail}", file=sys.stderr); raise SystemExit(1)
+
+    if a.action == 'followup':
+        if a.agent not in ('cora', 'pixie', 'gemini') or not a.run_id or not a.text or not a.text.strip() or len(a.text) > 8000:
+            p.error('followup requires --agent, --run-id and nonempty --text (max 8000)')
+        if any((a.topic, a.reply_to, a.message_id, a.subject, a.body, a.relay_thread, a.buttons, a.emoji, a.put, a.goal, a.board, a.title, a.fresh, a.role, a.difficulty, a.reason, a.since is not None)):
+            p.error('followup destination comes from the completed run; other action options are not allowed')
+        state = pathlib.Path(os.environ.get('ATRIUM_CHANNEL_STATE') or os.environ.get('CORPUS_WEB_STATE') or pathlib.Path.home() / '.claude/channels/corpus-web')
+        try:
+            credential = json.loads((state / f'body-owner-{a.agent}.json').read_text())
+            if credential.get('agent') != a.agent or not isinstance(credential.get('owner'), str) or not credential['owner'] or not isinstance(credential.get('pid'), int):
+                raise ValueError('invalid owner')
+        except (OSError, ValueError, TypeError) as exc:
+            p.error('본체 브리지 증표가 없어요. 본체 브리지가 등록된 뒤 다시 시도해 주세요.')
+        result = request('/notify/followup', 'POST', {'agent': a.agent, 'runId': a.run_id, 'text': a.text}, extra_headers={'x-atrium-persona': a.agent, 'x-atrium-owner': credential['owner'], 'x-atrium-client-pid': str(os.getpid())})
+        print(json.dumps(result, ensure_ascii=False))
+        raise SystemExit()
 
     def with_canvas(decision, runtimes, allowed=None, cora_usage=None, agent_usage=None):
         result = request('/canvas/workflow/route', 'POST', {'preferred': decision['target'], 'runtimes': runtimes, **({'allowed': list(allowed)} if allowed else {})}, optional_route=True)
