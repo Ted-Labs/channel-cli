@@ -102,6 +102,11 @@ def parser():
     sub = p.add_subparsers(dest="command", required=True)
     account = sub.add_parser('account', help='Claude 개인/Team 계정 선택 (다음 재시작부터 적용)')
     account.add_argument('profile', nargs='?', choices=accounts.PROFILES)
+    followup_claim = sub.add_parser('followup-claim', help='validate and reserve a completed queue job followup')
+    followup_claim.add_argument('--job-id', required=True)
+    followup_claim.add_argument('--persona', required=True, choices=('cora', 'pixie', 'gemini'))
+    followup_claim.add_argument('--client-pid', required=True, type=int)
+    followup_claim.add_argument('--request-id', required=True)
     agents = sub.add_parser("agents", help="설치된 에이전트 보기")
     agents.add_argument('--verbose', '-v', action='store_true', help='실행 파일 경로도 표시')
     send = sub.add_parser("send", help="enqueue a message; '-' reads stdin")
@@ -188,7 +193,11 @@ def worker(store, args):
                     print(f"실행 중 · @{job['agent']} · {job['id'][:8]}\n", flush=True)
                 session = store.session(job)
                 followup_id = None
-                reply = adapters.run(job["agent"], job["prompt"], job["cwd"], session,
+                from . import followup as queue_followup
+                executor = queue_followup.capture(job)
+                store.bind_executor(job, executor)
+                prompt = queue_followup.prompt(job, job['prompt']) if executor else job['prompt']
+                reply = adapters.run(job["agent"], prompt, job["cwd"], session,
                                      args.timeout, store.home / "logs" / job["id"] / str(job["attempts"]),
                                      on_turn=lambda thread, turn, j=job["id"]: store.set_turn(j, thread, turn),
                                      on_session=lambda native, j=job: store.set_session(
@@ -198,6 +207,7 @@ def worker(store, args):
                                      should_interrupt=lambda j=job["id"], a=job["attempts"]: store.interrupt_requested(j, a),
                                      channel=job["channel"])
                 while True:
+                    if reply.session: store.executor_session(job["id"], reply.session)
                     outcome = store.finish_or_steer(job, reply.text, session=reply.session)
                     if "steer" not in outcome:
                         result = outcome["job"]
@@ -287,6 +297,11 @@ def main():
                 raise ValueError("--fresh requires codex-body or agy-body")
             emit(store.enqueue(args.channel, args.room, decision.agent, text, decision.prompt, args.cwd,
                                args.message_id, fresh=args.fresh, priority=decision.priority, tier=decision.tier, assignment_reason=args.assignment_reason, persona=args.persona, canvas_revision=int(args.canvas_revision) if args.canvas_revision is not None else None), args)
+        elif args.command == 'followup-claim':
+            try:
+                emit(store.reserve_followup(args.job_id, args.persona, args.client_pid, args.request_id), args)
+            except ValueError as error:
+                emit({'error': str(error), 'status': getattr(error, 'status', 404)}, args)
         elif args.command == "worker":
             def interrupted(signum, frame):
                 raise KeyboardInterrupt
@@ -323,7 +338,7 @@ def main():
                 raise ValueError(f"@{job['agent']} has no running turn; the job stays queued")
             mode = adapters.steer(job["agent"], store.turn(current["id"]), job["prompt"])
             if mode == "direct":
-                emit(store.steered(job["id"], current["id"]), args)
+                emit(store.steered(job["id"], current["id"], native_accepted=True), args)
             else:
                 emit(store.steered(job["id"], current["id"], defer_prompt=job["prompt"]), args)
         elif args.command in ("cancel", "retry"):

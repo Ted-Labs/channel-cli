@@ -104,22 +104,21 @@ class WebTests(unittest.TestCase):
         self.assertFalse((self.home / 'queue').exists())
         self.assertEqual(self.requests, [])
 
-    def test_followup_uses_current_body_owner_and_server_destination(self):
-        state = self.home / '.claude/channels/corpus-web'
-        state.mkdir(parents=True)
-        (state / 'body-owner-pixie.json').write_text(json.dumps({'agent': 'pixie', 'pid': 123, 'owner': 'body-proof'}))
-        self.cli('followup', '--agent', 'pixie', '--run-id', '123', '--text', '후속 알림')
+    def test_followup_uses_common_job_id_and_server_destination_without_bridge_owner(self):
+        job_id = 'a' * 32
+        self.cli('followup', '--agent', 'pixie', '--job-id', job_id, '--text', '후속 알림')
         method, path, auth, payload = self.requests[-1]
         self.assertEqual((method, path, auth), ('POST', '/notify/followup', 'Bearer test-new'))
-        self.assertEqual(payload, {'agent': 'pixie', 'runId': '123', 'text': '후속 알림'})
+        self.assertEqual(payload, {'agent': 'pixie', 'jobId': job_id, 'text': '후속 알림'})
         headers = {k.lower(): v for k, v in self.followup_headers[-1].items()}
-        self.assertEqual(headers['x-atrium-owner'], 'body-proof')
-        self.assertEqual(headers['x-atrium-persona'], 'pixie')
+        self.assertNotIn('x-atrium-owner', headers)
         self.assertTrue(headers['x-atrium-client-pid'].isdigit())
         self.assertFalse((self.home / 'queue').exists())
-        self.cli('followup', '--agent', 'pixie', '--run-id', '123', '--text', 'bad', '--topic', 'other', expected=2)
+        self.cli('followup', '--agent', 'pixie', '--run-id', job_id, '--text', '이전 옵션 별칭')
+        self.assertEqual(self.requests[-1][3]['jobId'], job_id)
+        self.cli('followup', '--agent', 'pixie', '--job-id', job_id, '--text', 'bad', '--topic', 'other', expected=2)
 
-    def test_followup_without_owner_or_required_run_is_rejected_locally(self):
+    def test_followup_without_common_job_or_persona_is_rejected_locally(self):
         self.cli('followup', '--agent', 'cora', '--run-id', '123', '--text', '알림', expected=2)
         self.cli('followup', '--agent', 'cora', '--text', '알림', expected=2)
         self.assertEqual(self.requests, [])

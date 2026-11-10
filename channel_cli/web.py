@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -19,7 +20,8 @@ def add_arguments(p):
     p.add_argument("--agent", default=os.environ.get("CORPUS_PERSONA", ""))
     p.add_argument("--topic")
     p.add_argument("--reply-to")
-    p.add_argument("--run-id", help="Return the final answer of a queued body run")
+    p.add_argument("--job-id", help="Completed common queue job ID for followup")
+    p.add_argument("--run-id", help="Reply: body run ID; followup: alias for common queue --job-id")
     p.add_argument("--message-id")
     p.add_argument("--text")
     p.add_argument("--emoji")
@@ -68,6 +70,7 @@ def change(who, rest):
 
 
 def run(a, p):
+    if a.job_id and a.action != "followup": p.error("--job-id is only for followup")
     if a.run_id and a.action not in ("reply", "followup"): p.error("--run-id is only for reply/followup")
     token = (os.environ.get("ATRIUM_TOKEN") or os.environ.get("ARTRIUM_TOKEN"))
     if not token:
@@ -89,18 +92,14 @@ def run(a, p):
             print(f"atrium: {detail}", file=sys.stderr); raise SystemExit(1)
 
     if a.action == 'followup':
-        if a.agent not in ('cora', 'pixie', 'gemini') or not a.run_id or not a.text or not a.text.strip() or len(a.text) > 8000:
-            p.error('followup requires --agent, --run-id and nonempty --text (max 8000)')
+        job_id = a.job_id or a.run_id
+        if a.job_id and a.run_id and a.job_id != a.run_id:
+            p.error('--job-id and --run-id must refer to the same queue job')
+        if a.agent not in ('cora', 'pixie', 'gemini') or not job_id or not re.fullmatch(r'[0-9a-f]{32}', job_id) or not a.text or not a.text.strip() or len(a.text) > 8000:
+            p.error('followup requires --agent, --job-id (or --run-id queue ID), and nonempty --text (max 8000)')
         if any((a.topic, a.reply_to, a.message_id, a.subject, a.body, a.relay_thread, a.buttons, a.emoji, a.put, a.goal, a.board, a.title, a.fresh, a.role, a.difficulty, a.reason, a.since is not None)):
-            p.error('followup destination comes from the completed run; other action options are not allowed')
-        state = pathlib.Path(os.environ.get('ATRIUM_CHANNEL_STATE') or os.environ.get('CORPUS_WEB_STATE') or pathlib.Path.home() / '.claude/channels/corpus-web')
-        try:
-            credential = json.loads((state / f'body-owner-{a.agent}.json').read_text())
-            if credential.get('agent') != a.agent or not isinstance(credential.get('owner'), str) or not credential['owner'] or not isinstance(credential.get('pid'), int):
-                raise ValueError('invalid owner')
-        except (OSError, ValueError, TypeError) as exc:
-            p.error('본체 브리지 증표가 없어요. 본체 브리지가 등록된 뒤 다시 시도해 주세요.')
-        result = request('/notify/followup', 'POST', {'agent': a.agent, 'runId': a.run_id, 'text': a.text}, extra_headers={'x-atrium-persona': a.agent, 'x-atrium-owner': credential['owner'], 'x-atrium-client-pid': str(os.getpid())})
+            p.error('followup destination comes from the completed job; other action options are not allowed')
+        result = request('/notify/followup', 'POST', {'agent': a.agent, 'jobId': job_id, 'text': a.text}, extra_headers={'x-atrium-client-pid': str(os.getpid())})
         print(json.dumps(result, ensure_ascii=False))
         raise SystemExit()
 

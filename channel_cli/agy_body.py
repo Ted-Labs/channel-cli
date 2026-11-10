@@ -486,6 +486,7 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
             break
 
     last_answer = ""
+    reported_conversation = None
     unconfirmed_idle_at = None
     # Monitor until completion
     while True:
@@ -498,6 +499,10 @@ def run(prompt, timeout=300, session=None, fresh=False, on_session=None,
         match = request_transcript(marker)
         if match:
             transcript, min_line = match
+            conversation = transcript.parents[2].name if len(transcript.parents) > 2 else ''
+            if on_turn and re.fullmatch(r'[a-f0-9-]{36}', conversation) and conversation != reported_conversation:
+                on_turn(conversation, marker)
+                reported_conversation = conversation
             unconfirmed_idle_at = None
         elif not is_busy(session):
             if unconfirmed_idle_at is None:

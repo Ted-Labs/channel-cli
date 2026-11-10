@@ -37,7 +37,9 @@ class AgyBodyTests(unittest.TestCase):
 
     def test_native_session_is_persisted_before_injection(self):
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = Path(tmp) / 'transcript.jsonl'
+            conversation = '11111111-2222-3333-4444-555555555555'
+            transcript = Path(tmp) / 'brain' / conversation / '.system_generated/logs/transcript.jsonl'
+            transcript.parent.mkdir(parents=True)
             transcript.write_text(json.dumps({'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'content': 'Gemini answer'}) + '\n')
             steps = []
 
@@ -50,12 +52,13 @@ class AgyBodyTests(unittest.TestCase):
                  patch.object(agy_body, 'request_transcript', return_value=(transcript, 0)), \
                  patch.object(agy_body.subprocess, 'run', side_effect=tmux), \
                  patch.object(agy_body.time, 'sleep'):
-                reply = agy_body.run('short task', session='gemini', on_session=lambda session: steps.append(('session', session)))
+                reply = agy_body.run('short task', session='gemini', on_session=lambda session: steps.append(('session', session)), on_turn=lambda thread, turn: steps.append(('turn', thread)))
 
         self.assertEqual(reply.text, 'Gemini answer')
         self.assertEqual(reply.session, 'gemini')
         self.assertEqual(steps[0], ('session', 'gemini'))
         self.assertEqual(steps[1][1][1], 'load-buffer')
+        self.assertEqual([step for step in steps if step[0] == 'turn'], [('turn', 'gemini'), ('turn', conversation)])
 
     def test_persona_channel_routes_to_its_own_agy_tmux_session(self):
         with patch.object(agy_body, 'is_agy_session', side_effect=lambda s: s in {'cora', 'gemini'}):

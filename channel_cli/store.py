@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS jobs (
  created REAL NOT NULL, started REAL, finished REAL, attempts INTEGER NOT NULL DEFAULT 0,
  UNIQUE(channel, room, message_id)
 );
+CREATE TABLE IF NOT EXISTS job_executors (
+ job_id TEXT PRIMARY KEY, identity TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS job_followups (
+ job_id TEXT NOT NULL, request_id TEXT PRIMARY KEY, created REAL NOT NULL,
+ ordinal INTEGER NOT NULL, UNIQUE(job_id, ordinal)
+);
 CREATE TABLE IF NOT EXISTS turns (
  job_id TEXT PRIMARY KEY, thread TEXT NOT NULL, turn TEXT NOT NULL
 );
@@ -193,12 +200,57 @@ class Store:
             self.event(row["id"], "running")
         return self.get(row["id"])
 
+    def bind_executor(self, job, identity):
+        with self.db:
+            if identity is None:
+                self.db.execute('DELETE FROM job_executors WHERE job_id=?', (job['id'],))
+            else:
+                self.db.execute('INSERT OR REPLACE INTO job_executors VALUES(?,?)', (job['id'], json.dumps(identity)))
+
+    def executor_session(self, job_id, session):
+        row = self.db.execute('SELECT identity FROM job_executors WHERE job_id=?', (job_id,)).fetchone()
+        if row:
+            identity = json.loads(row['identity'])
+            identity['session'] = session
+            with self.db:
+                self.db.execute('UPDATE job_executors SET identity=? WHERE job_id=?', (json.dumps(identity), job_id))
+
+    def reserve_followup(self, job_id, persona, pid, request_id):
+        from .followup import authorized, FollowupError
+        if not re.fullmatch(r'[0-9a-f]{32}', job_id) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', request_id):
+            raise FollowupError(400, '공통 큐 job ID와 유효한 게시 ID가 필요해요.')
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            job = self.get(job_id)
+            if job['state'] != 'done':
+                raise FollowupError(409, '완료된 공통 큐 작업에만 후속 알림을 보낼 수 있어요.')
+            if job['persona'] != persona or job['agent'] not in ('claude-body', 'codex-body', 'agy-body') or job['channel'] != f'atrium-web:{persona}' or not job['message_id']:
+                raise FollowupError(403, '이 본체가 실행한 웹 큐 요청이 아니에요.')
+            if job['finished'] is None or time.time() - job['finished'] >= 86400 or job['finished'] > time.time():
+                raise FollowupError(410, '완료 후 24시간이 지났어요.')
+            row = self.db.execute('SELECT identity FROM job_executors WHERE job_id=?', (job_id,)).fetchone()
+            if not row or not authorized(json.loads(row['identity']), pid):
+                raise FollowupError(403, '이 작업을 실행한 현재 본체만 후속 알림을 보낼 수 있어요. 분신·교체된 실행체는 사용할 수 없어요.')
+            prior = self.db.execute('SELECT job_id,ordinal FROM job_followups WHERE request_id=?', (request_id,)).fetchone()
+            if prior and prior['job_id'] != job_id:
+                raise FollowupError(409, '다른 작업에서 사용한 게시 ID예요.')
+            count = self.db.execute('SELECT count(*) FROM job_followups WHERE job_id=?', (job_id,)).fetchone()[0]
+            if not prior:
+                if count >= 3:
+                    raise FollowupError(429, '요청당 후속 알림은 최대 3개예요.')
+                count += 1
+                self.db.execute('INSERT INTO job_followups VALUES(?,?,?,?)', (job_id, request_id, time.time(), count))
+                payload = {**job, 'followup': {'index': count, 'message_id': request_id}}
+                self.db.execute('INSERT INTO events(job_id,type,created,payload) VALUES(?,?,?,?)', (job_id, 'followup', time.time(), json.dumps(payload, ensure_ascii=False)))
+            return {'jobId': job_id, 'topic': job['room'], 'replyTo': job['message_id'], 'index': prior['ordinal'] if prior else count}
+
     def session(self, job):
         row = self.db.execute("SELECT native_id FROM sessions WHERE channel=? AND room=? AND agent=?",
                               (job["channel"], job["room"], job["agent"])).fetchone()
         return row["native_id"] if row else None
 
     def set_session(self, job, session, consume_fresh=False):
+        self.executor_session(job["id"], session)
         if not session:
             raise ValueError("native session ID is required")
         with self.db:
@@ -347,6 +399,12 @@ class Store:
 
     def set_turn(self, job_id, thread, turn):
         with self.db:
+            row = self.db.execute('SELECT identity FROM job_executors WHERE job_id=?', (job_id,)).fetchone()
+            if row:
+                identity = json.loads(row['identity'])
+                if identity['engine'] == 'agy-body':
+                    identity['conversation'] = thread
+                    self.db.execute('UPDATE job_executors SET identity=? WHERE job_id=?', (json.dumps(identity), job_id))
             self.db.execute("INSERT OR REPLACE INTO turns VALUES(?,?,?)", (job_id, thread, turn))
             self.event(job_id, "turn")
 
@@ -359,7 +417,7 @@ class Store:
                               (agent, persona)).fetchone()
         return self.get(row["id"]) if row else None
 
-    def steered(self, job_id, into, defer_prompt=None):
+    def steered(self, job_id, into, defer_prompt=None, native_accepted=False):
         """Record an instruction as either native turn steering or a follow-up turn."""
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -367,7 +425,10 @@ class Store:
             if job["state"] != "queued":
                 raise ValueError(f"cannot steer a {job['state']} job")
             target = self.get(into)
-            if target["state"] != "running" or target["agent"] != job["agent"] or target["persona"] != job["persona"]:
+            # A native steer ACK may race the worker recording its completed turn.
+            # Deferred prompts still require a running target: no input was sent yet.
+            accepted_terminal = native_accepted and defer_prompt is None and target['state'] == 'done'
+            if (target["state"] != "running" and not accepted_terminal) or target["agent"] != job["agent"] or target["persona"] != job["persona"]:
                 raise ValueError("target job is no longer running for this agent")
             if defer_prompt is not None:
                 self.db.execute("INSERT INTO steer_requests(source_job_id,target_job_id,prompt,created) VALUES(?,?,?,?)",
