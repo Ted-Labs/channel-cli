@@ -34,3 +34,19 @@ class PersonasTest(unittest.TestCase):
             self.assertEqual(personas.ids(),('cora','pixie','gemini'))
 
 if __name__ == '__main__': unittest.main()
+
+class CompactHeaderTest(unittest.TestCase):
+    def test_followup_is_merged_into_header_preserving_security_fields(self):
+        original = '[Atrium metadata] {"chat_id":"dev"}\n[Atrium] {"persona":"픽시","lang":"ko","ssh":"/safe/ssh_rule.md","rules":"~/Corpus/agents/ATRIUM_RULES.md"}\n본문'
+        result = followup.prompt({'persona':'pixie','id':'a'*32}, original)
+        lines = result.splitlines()
+        self.assertTrue(lines[0].startswith('[Atrium metadata] '))
+        header = json.loads(lines[1][len('[Atrium] '):])
+        self.assertEqual(header['ssh'], '/safe/ssh_rule.md')
+        self.assertEqual(header['followup'], 'a'*32)
+        self.assertEqual(lines[2], '본문')
+        self.assertNotIn('[Atrium 후속 알림]', result)
+
+    def test_invalid_existing_header_is_rejected(self):
+        with self.assertRaises(ValueError):
+            followup.prompt({'persona':'pixie','id':'a'*32}, '[Atrium] broken\n본문')

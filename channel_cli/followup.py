@@ -1,4 +1,5 @@
 """Bind queue jobs to their canonical live body, independent of transport."""
+import json
 import socket
 import struct
 import subprocess
@@ -131,4 +132,20 @@ def caller_persona(pid):
 
 
 def prompt(job, text):
-    return text + f"\n\n[Atrium 후속 알림]\n공통 큐 작업 ID: {job['id']}. 완료된 뒤 추가 결과만 atrium followup --agent {job['persona']} --job-id {job['id']} --text '<후속 알림>' 으로 게시한다(원 요청 답장, 24시간 이내, 최대 3개). 최종 답을 중복 게시하지 않는다."
+    lines = text.splitlines(keepends=True)
+    index = 1 if lines and lines[0].startswith('[Atrium metadata] ') else 0
+    prefix = '[Atrium] '
+    if len(lines) > index and lines[index].startswith(prefix):
+        try:
+            header = json.loads(lines[index][len(prefix):])
+            if not isinstance(header, dict): raise ValueError('invalid header')
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid Atrium header") from exc
+        lines[index] = prefix + json.dumps({**header, 'followup': job['id']}, ensure_ascii=False, separators=(',', ':')) + '\n'
+    else:
+        persona = job['persona']
+        entry = personas.config(persona)
+        header = {'persona': entry.get('name', persona), 'lang': 'ko', 'rules': '~/Corpus/agents/ATRIUM_RULES.md', 'read': ['identity', 'rules'], 'followup': job['id']}
+        if entry.get('instructionsFile'): header['identity'] = '~/Corpus/' + entry['instructionsFile']
+        lines.insert(index, prefix + json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n')
+    return ''.join(lines)
