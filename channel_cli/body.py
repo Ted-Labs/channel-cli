@@ -263,7 +263,8 @@ def run(prompt, timeout, socket_path=None, session=None, fresh=False, on_session
                 if status not in (None, "completed"):
                     raise ValueError(f"codex turn ended as {status}: {(params.get('turn') or {}).get('error')}")
                 break
-        text = "\n".join(p for p in parts if p).strip()
+        # Progress parts are already published through on_part; the final answer is the last one.
+        text = next((p.strip() for p in reversed(parts) if p and p.strip()), "")
         if not text:
             raise ValueError("codex turn finished without an answer")
         return Reply(text, thread)
