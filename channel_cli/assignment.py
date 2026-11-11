@@ -31,7 +31,7 @@ def _number(value):
 
 
 def _used_percent(agent, cora_usage, agent_usage):
-    if agent == "cora":
+    if personas.config(agent).get("usageSource", "primary" if agent == personas.master() else "agent") == "primary":
         if not isinstance(cora_usage, dict):
             return None
         values = [_number((cora_usage.get(window) or {}).get("utilization",

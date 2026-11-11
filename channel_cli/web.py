@@ -173,7 +173,7 @@ def run(a, p):
             print("  사용량 정보를 불러올 수 없습니다.")
 
         for persona in personas.registry():
-            if persona['id'] == 'cora':
+            if persona['id'] == personas.master():
                 continue
             key = persona.get('usageKey', persona['id'])
             print(f"\n=== {persona.get('name', persona['id'])} ===")
@@ -199,8 +199,8 @@ def run(a, p):
         if not a.subject: p.error("share requires <file>")
         src = pathlib.Path(a.subject).expanduser().resolve()
         if not src.is_file(): p.error(f"no such file: {src}")
-        who = a.agent if a.agent in personas.ids() else "cora"
-        res = request("/notify", "POST", {"topic": a.topic or (f"direct-{who}" if who != "cora" else "dev"), "text": a.body or a.text or src.name, "file_path": str(src), "from": who})
+        who = a.agent if a.agent in personas.ids() else personas.master()
+        res = request("/notify", "POST", {"topic": a.topic or (f"direct-{who}" if who != personas.master() else "dev"), "text": a.body or a.text or src.name, "file_path": str(src), "from": who})
         if not res.get("file"): print("atrium: 첨부가 만들어지지 않았다", file=sys.stderr); raise SystemExit(1)
         url = PUBLIC + res["file"]
         try:
@@ -256,7 +256,7 @@ def run(a, p):
                 runtimes = request("/agents").get("runtimes")
                 cora_usage = request("/sys/usage", timeout=15, allow_error=True)
                 agent_usage = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
-                decision = with_canvas(recommend(a.role, a.difficulty, runtimes, cora_usage, agent_usage, allowed=set(personas.ids()) - {"cora"}), runtimes, set(personas.ids()) - {"cora"}, cora_usage, agent_usage)
+                decision = with_canvas(recommend(a.role, a.difficulty, runtimes, cora_usage, agent_usage, allowed=set(personas.ids()) - {personas.master()}), runtimes, set(personas.ids()) - {personas.master()}, cora_usage, agent_usage)
             except ValueError as exc: p.error(str(exc))
             a.subject = decision["target"]
         if a.text is not None: p.error(f"{a.action} text is positional")

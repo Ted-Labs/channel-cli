@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 _DEFAULTS = [
-    {'id': 'cora', 'name': '코라', 'cwd': '~/Corpus'},
+    {'id': 'cora', 'name': '코라', 'cwd': '~/Corpus', 'role': 'master'},
     {'id': 'pixie', 'name': '픽시', 'cwd': '~/codex-jobs'},
     {'id': 'gemini', 'name': 'Gemini', 'cwd': '~/agy-jobs'},
 ]
@@ -44,3 +44,7 @@ def session(persona):
     key = f"AGENT_{persona.upper().replace('-', '_')}_TMUX"
     legacy = {'cora': 'CHANNEL_CORA_SESSION', 'gemini': 'CHANNEL_AGY_SESSION'}
     return os.environ.get(key) or (os.environ.get(legacy[persona]) if persona in legacy else None) or config(persona).get('tmuxSession') or persona
+
+def master():
+    entries = registry()
+    return next((item['id'] for item in entries if item.get('role') == 'master'), entries[0]['id'])
