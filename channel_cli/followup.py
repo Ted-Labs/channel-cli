@@ -145,7 +145,7 @@ def prompt(job, text):
     else:
         persona = job['persona']
         entry = personas.config(persona)
-        header = {'persona': entry.get('name', persona), 'lang': 'ko', 'rules': '~/Corpus/agents/ATRIUM_RULES.md', 'read': ['identity', 'rules'], 'followup': job['id']}
+        header = {'id': persona, 'persona': entry.get('name', persona), 'lang': 'ko', 'rules': '~/Corpus/agents/ATRIUM_RULES.md', 'read': ['identity', 'rules'], 'followup': job['id']}
         if entry.get('instructionsFile'): header['identity'] = '~/Corpus/' + entry['instructionsFile']
         lines.insert(index, prefix + json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n')
     return ''.join(lines)
