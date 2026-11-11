@@ -11,7 +11,7 @@ class QueueFollowupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             s = Store(home)
             try:
-                for persona, engine in zip(followup.PERSONAS, followup.ENGINES):
+                for persona, engine in zip(followup.personas.ids(), followup.ENGINES):
                     job = s.enqueue(f'atrium-web:{persona}', 'dev', engine, 'one', 'one', cwd=home, persona=persona, message_id=persona)
                     job = s.claim(engine, persona)
                     s.bind_executor(job, {'persona': persona, 'engine': engine, 'pane': {'pid': 10, 'start': '20'}})

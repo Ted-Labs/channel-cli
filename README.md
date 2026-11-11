@@ -135,3 +135,5 @@ codex-body는 app-server turn steer를, claude-body·agy-body는 현재 응답 �
 개인은 기존 `~/.claude`와 `~/.claude.json`, Team은 `~/.claude-team`과 그 안의 `.claude.json`을 사용한다. Team 선택 시 settings.json·settings.local.json·CLAUDE.md·skills·hooks만 개인 폴더에 심볼릭 링크한다. 인증과 세션 기록은 연결하지 않는다. 기존 파일이나 인증 공유 링크가 있으면 덮어쓰지 않고 거부한다.
 
 Team 로그인은 사용자가 `CLAUDE_CONFIG_DIR="$HOME/.claude-team" claude auth login`으로 직접 수행한다. `account` 명령은 로그인하지 않으며 인증 파일을 복사하거나 생성하지 않는다. `--json` 조회도 지원한다.
+
+인격 목록은 기본적으로 `~/Corpus/Atrium/web/atrium/agents.json`에서 읽는다. `ATRIUM_AGENTS_PATH`로 다른 목록 파일을 지정할 수 있으며, 파일을 읽지 못하거나 형식이 잘못되면 기존 코라·픽시·제미나이 목록을 사용한다. 선택 필드 `tmuxSession`, `cwd`, `usageKey`로 인격별 세션·작업 경로·사용량 키를 지정할 수 있다. 지정하지 않으면 인격 ID를 기본으로 쓰며, 기존 세 인격의 경로와 세션 환경 변수는 호환된다.

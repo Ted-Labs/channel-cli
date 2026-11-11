@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from .adapters import Reply, Interrupted
+from . import personas
 
 
 def default_session():
@@ -25,14 +26,7 @@ def session_for_channel(channel):
     persona = str(channel).split(":", 1)[1].strip()
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", persona):
         return None
-    if persona == "cora":
-        return os.environ.get("CHANNEL_CORA_SESSION", "cora")
-    if persona == "pixie":
-        return os.environ.get("AGENT_PIXIE_TMUX", "pixie")
-    if persona == "gemini":
-        return os.environ.get("AGENT_GEMINI_TMUX") or default_session()
-    env_key = f"AGENT_{persona.upper().replace('-', '_')}_TMUX"
-    return os.environ.get(env_key, persona)
+    return personas.session(persona)
 
 
 def tmux_bin():

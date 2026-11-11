@@ -3,6 +3,7 @@ import socket
 import struct
 import subprocess
 from pathlib import Path
+from . import personas
 
 class FollowupError(ValueError):
     def __init__(self, status, message):
@@ -10,7 +11,6 @@ class FollowupError(ValueError):
         self.status = status
 
 
-PERSONAS = ('cora', 'pixie', 'gemini')
 ENGINES = ('claude-body', 'codex-body', 'agy-body')
 
 
@@ -41,7 +41,7 @@ def daemon():
 
 
 def capture(job):
-    if job.get('persona') not in PERSONAS or job['agent'] not in ENGINES:
+    if job.get('persona') not in personas.ids() or job['agent'] not in ENGINES:
         return None
     try:
         current = pane(job['persona'])
@@ -102,7 +102,7 @@ def caller_persona(pid):
     (or, for Codex, its app-server daemon) without crossing another engine
     process or a forked/background session.
     """
-    for persona in PERSONAS:
+    for persona in personas.ids():
         try:
             current = pane(persona)
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -110,7 +110,7 @@ def caller_persona(pid):
         if any(a.startswith(('--fork-session', '--bg-spare', '--bg-pty-host')) for a in current['args']):
             continue
         roots = {current['pid']}
-        if persona == 'pixie':
+        if any(Path(a).name == 'codex' for a in current['args']):
             try:
                 roots.add(daemon()['pid'])
             except (OSError, ValueError):

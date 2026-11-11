@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from . import adapters, body, web, cweb, accounts
+from . import adapters, body, web, cweb, accounts, personas
 from .store import Store
 from .output import emit as display
 
@@ -104,7 +104,7 @@ def parser():
     account.add_argument('profile', nargs='?', choices=accounts.PROFILES)
     followup_claim = sub.add_parser('followup-claim', help='validate and reserve a completed queue job followup')
     followup_claim.add_argument('--job-id', required=True)
-    followup_claim.add_argument('--persona', required=True, choices=('cora', 'pixie', 'gemini'))
+    followup_claim.add_argument('--persona', required=True, choices=personas.ids())
     followup_claim.add_argument('--client-pid', required=True, type=int)
     followup_claim.add_argument('--request-id', required=True)
     caller = sub.add_parser('caller-persona', help='identify the live body persona that started a process')

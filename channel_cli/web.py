@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from .assignment import recommend, _used_percent, POLICY
+from . import personas
 
 COMMANDS = ('followup', 'reply', 'edit', 'react', 'buttons', 'relay', 'deliver', 'log', 'draft', 'share', 'handoff', 'usage', 'assign')
 
@@ -95,7 +96,7 @@ def run(a, p):
         job_id = a.job_id or a.run_id
         if a.job_id and a.run_id and a.job_id != a.run_id:
             p.error('--job-id and --run-id must refer to the same queue job')
-        if a.agent not in ('cora', 'pixie', 'gemini') or not job_id or not re.fullmatch(r'[0-9a-f]{32}', job_id) or not a.text or not a.text.strip() or len(a.text) > 8000:
+        if a.agent not in personas.ids() or not job_id or not re.fullmatch(r'[0-9a-f]{32}', job_id) or not a.text or not a.text.strip() or len(a.text) > 8000:
             p.error('followup requires --agent, --job-id (or --run-id queue ID), and nonempty --text (max 8000)')
         if any((a.topic, a.reply_to, a.message_id, a.subject, a.body, a.relay_thread, a.buttons, a.emoji, a.put, a.goal, a.board, a.title, a.fresh, a.role, a.difficulty, a.reason, a.since is not None)):
             p.error('followup destination comes from the completed job; other action options are not allowed')
@@ -108,7 +109,7 @@ def run(a, p):
         if not result or result.get('revision') is None:
             return {**decision, 'canvas_revision': None}
         target = result.get('target')
-        if target not in ('cora', 'pixie', 'gemini') or allowed and target not in allowed:
+        if target not in personas.ids() or allowed and target not in allowed:
             p.error('active canvas returned an invalid target')
         updated = {**decision, 'target': target, 'canvas_revision': result['revision'], 'priority': result.get('priority') if result.get('priority') is not None else decision['priority'], 'reason': f"캔버스 revision {result['revision']}: {target} 배정 (기본 추천: {decision['target']})"}
         if target != decision['target']:
@@ -171,25 +172,18 @@ def run(a, p):
         else:
             print("  사용량 정보를 불러올 수 없습니다.")
 
-        print("\n=== 픽시 (Codex) ===")
-        pixie_list = agents.get("pixie", []) if isinstance(agents, dict) else []
-        if pixie_list:
-            for m in pixie_list:
-                used = float(m.get("used", 0))
-                tag = " [한도 도달]" if used >= 100 else ""
+        for persona in personas.registry():
+            if persona['id'] == 'cora':
+                continue
+            key = persona.get('usageKey', persona['id'])
+            print(f"\n=== {persona.get('name', persona['id'])} ===")
+            meters = agents.get(key, []) if isinstance(agents, dict) else []
+            for m in meters:
+                used = float(m.get('used', 0))
+                tag = ' [한도 도달]' if used >= 100 else ''
                 print(f"  {m.get('name', '한도'):<6}: {used:>5.1f}%{tag} (리셋: {fmt_time(m.get('resetsAt'))})")
-        else:
-            print("  사용량 정보를 불러올 수 없습니다.")
-
-        print("\n=== 제미나이 (AGY) ===")
-        gemini_list = agents.get("gemini", []) if isinstance(agents, dict) else []
-        if gemini_list:
-            for m in gemini_list:
-                used = float(m.get("used", 0))
-                tag = " [한도 도달]" if used >= 100 else ""
-                print(f"  {m.get('name', '한도'):<30}: {used:>5.1f}%{tag} (리셋: {fmt_time(m.get('resetsAt'))})")
-        else:
-            print("  사용량 정보를 불러올 수 없습니다.")
+            if not meters:
+                print('  사용량 정보를 불러올 수 없습니다.')
         raise SystemExit()
 
     if a.action == "handoff":
@@ -205,8 +199,8 @@ def run(a, p):
         if not a.subject: p.error("share requires <file>")
         src = pathlib.Path(a.subject).expanduser().resolve()
         if not src.is_file(): p.error(f"no such file: {src}")
-        who = a.agent if a.agent in ("pixie", "gemini") else "cora"
-        res = request("/notify", "POST", {"topic": a.topic or (f"direct-{who}" if who in ("pixie", "gemini") else "dev"), "text": a.body or a.text or src.name, "file_path": str(src), "from": who})
+        who = a.agent if a.agent in personas.ids() else "cora"
+        res = request("/notify", "POST", {"topic": a.topic or (f"direct-{who}" if who != "cora" else "dev"), "text": a.body or a.text or src.name, "file_path": str(src), "from": who})
         if not res.get("file"): print("atrium: 첨부가 만들어지지 않았다", file=sys.stderr); raise SystemExit(1)
         url = PUBLIC + res["file"]
         try:
@@ -262,7 +256,7 @@ def run(a, p):
                 runtimes = request("/agents").get("runtimes")
                 cora_usage = request("/sys/usage", timeout=15, allow_error=True)
                 agent_usage = request("/sys/usage/agents", timeout=15, allow_error=True) or {}
-                decision = with_canvas(recommend(a.role, a.difficulty, runtimes, cora_usage, agent_usage, allowed={"pixie", "gemini"}), runtimes, {"pixie", "gemini"}, cora_usage, agent_usage)
+                decision = with_canvas(recommend(a.role, a.difficulty, runtimes, cora_usage, agent_usage, allowed=set(personas.ids()) - {"cora"}), runtimes, set(personas.ids()) - {"cora"}, cora_usage, agent_usage)
             except ValueError as exc: p.error(str(exc))
             a.subject = decision["target"]
         if a.text is not None: p.error(f"{a.action} text is positional")

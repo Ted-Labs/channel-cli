@@ -116,15 +116,8 @@ def persona_cwd(channel):
     env_key = f"AGENT_{persona.upper().replace('-', '_')}_CWD"
     if os.environ.get(env_key):
         return os.environ[env_key]
-    home = Path.home()
-    if persona == "cora":
-        return str(home / "Corpus")
-    if persona == "pixie":
-        return str(home / "codex-jobs")
-    if persona == "gemini":
-        return str(home / "agy-jobs")
-    candidate = home / f"{persona}-jobs"
-    return str(candidate if candidate.is_dir() else (home / "Corpus"))
+    from .personas import cwd
+    return cwd(persona)
 
 
 def pick_thread(conn, notes, preferred_cwd=None):

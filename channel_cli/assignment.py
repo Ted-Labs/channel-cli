@@ -1,12 +1,12 @@
 """Role and capacity based task assignment recommendations."""
 import json
 from pathlib import Path
+from . import personas
 
 
 POLICY = json.loads(Path(__file__).with_name("assignment.json").read_text())
 ROLES = POLICY["roles"]
 DIFFICULTIES = ("쉬움", "보통", "어려움")
-NAMES = {"cora": "코라", "pixie": "픽시", "gemini": "Gemini"}
 
 
 def preference(role, difficulty):
@@ -38,7 +38,7 @@ def _used_percent(agent, cora_usage, agent_usage):
                                               (cora_usage.get(window) or {}).get("used_percent")))
                   for window in ("session", "weekly")]
     else:
-        meters = agent_usage.get("pixie" if agent == "pixie" else "gemini", [])
+        meters = agent_usage.get(personas.config(agent).get('usageKey', agent), [])
         values = [_number(m.get("used")) for m in meters if isinstance(m, dict)]
     valid = [value for value in values if value is not None]
     return max(valid) if valid else None
@@ -55,7 +55,12 @@ def _runtime_for(agent, runtimes):
 
 def recommend(role, difficulty, runtimes, cora_usage, agent_usage, allowed=None):
     """Return the first eligible preference or the first preference as queue fallback."""
-    ranked = preference(role, difficulty)
+    registered = personas.ids()
+    ranked = [agent for agent in preference(role, difficulty) if agent in registered]
+    configured = {agent for rule in ROLES.values() for group in (rule.values() if isinstance(rule, dict) else [rule]) for agent in group}
+    ranked += [agent for agent in registered if agent not in configured]
+    if not ranked:
+        ranked = list(registered)
     if allowed is not None:
         ranked = [agent for agent in ranked if agent in allowed]
         if not ranked:
@@ -80,10 +85,10 @@ def recommend(role, difficulty, runtimes, cora_usage, agent_usage, allowed=None)
         considered.append({"agent": agent, "rank": rank, "available": not reasons,
                            "usedPercent": used, "queuedCount": int((runtime or {}).get("queued", 0) or 0), "reasons": reasons})
         if not reasons:
-            skipped = "; ".join(f"{item['rank']}지망 {NAMES[item['agent']]}({', '.join(item['reasons'])})"
+            skipped = "; ".join(f"{item['rank']}지망 {personas.name(item['agent'])}({', '.join(item['reasons'])})"
                                  for item in rejected)
-            why = (f"{rank}지망 {NAMES[agent]}가 사용 가능" if not rejected else
-                   f"{skipped}를 건너뛰고 {rank}지망 {NAMES[agent]} 배정")
+            why = (f"{rank}지망 {personas.name(agent)}가 사용 가능" if not rejected else
+                   f"{skipped}를 건너뛰고 {rank}지망 {personas.name(agent)} 배정")
             return {"role": role, "difficulty": difficulty, "target": agent,
                     "preferenceRank": rank, "priority": priority, "tier": "body",
                     "available": True, "queued": False,
@@ -91,10 +96,10 @@ def recommend(role, difficulty, runtimes, cora_usage, agent_usage, allowed=None)
         rejected.append(considered[-1])
 
     first = ranked[0]
-    details = "; ".join(f"{item['rank']}지망 {NAMES[item['agent']]}: {', '.join(item['reasons'])}"
+    details = "; ".join(f"{item['rank']}지망 {personas.name(item['agent'])}: {', '.join(item['reasons'])}"
                          for item in considered)
     return {"role": role, "difficulty": difficulty, "target": first,
             "preferenceRank": 1, "priority": priority, "tier": "body",
             "available": False, "queued": True,
-            "reason": f"모든 지망이 현재 불가해 1지망 {NAMES[first]} 대기열로 보냄 (기존 대기 {considered[0]['queuedCount']}건, priority {priority}; {details})",
+            "reason": f"모든 지망이 현재 불가해 1지망 {personas.name(first)} 대기열로 보냄 (기존 대기 {considered[0]['queuedCount']}건, priority {priority}; {details})",
             "considered": considered}

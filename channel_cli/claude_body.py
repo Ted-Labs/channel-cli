@@ -8,10 +8,11 @@ import urllib.request
 from pathlib import Path
 
 from .adapters import Reply, Interrupted
+from . import personas
 
 
 def run(prompt, timeout=300, should_interrupt=None, persona="cora"):
-    if persona not in ("cora", "pixie", "gemini"):
+    if persona not in personas.ids():
         raise ValueError("invalid Claude persona")
     if should_interrupt and should_interrupt():
         raise Interrupted("stopped before delivering to Cora")
